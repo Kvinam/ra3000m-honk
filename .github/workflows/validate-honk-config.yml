@@ -147,5 +147,5 @@ jobs:
             source/feeds-install.log
             source/defconfig.log
             source/logs/feeds/daeuniverse/**/dump.txt
-          if-no-files-found: warn
+          if-no-files-found: warn`r`n          include-hidden-files: true
           retention-days: 7
