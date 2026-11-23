@@ -77,8 +77,7 @@ jobs:
           make defconfig 2>&1 | tee defconfig.log
           required=(
             CONFIG_TARGET_mediatek
-            CONFIG_TARGET_mediatek_filogic
-            CONFIG_PACKAGE_honk
+            CONFIG_TARGET_mediatek_filogic`r`n            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand`r`n            CONFIG_PACKAGE_honk
             CONFIG_PACKAGE_luci-app-honk
             CONFIG_PACKAGE_vmlinux-btf-builtin
             CONFIG_PACKAGE_kmod-veth
