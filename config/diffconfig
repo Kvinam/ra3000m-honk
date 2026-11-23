@@ -1,7 +1,7 @@
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
-# RAX3000M NAND is checked against pinned source profile/DTS in CI.
-# NAND-only profile: never enable the eMMC or 256M NAND profile.
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y
+# Explicitly select NAND-only RAX3000M profile; eMMC and 256M NAND excluded.
 
 # Honk Full: embedded eBPF + Native API + embedded Doona UI (package default features)
 CONFIG_PACKAGE_honk=y
