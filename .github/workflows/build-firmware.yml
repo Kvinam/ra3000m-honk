@@ -174,12 +174,16 @@ jobs:
           restore-keys: |
             staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}-
 
-      - name: Normalize staging cache timestamps
-        if: steps.staging-cache.outputs.cache-hit == 'true'
+      - name: Normalize staging cache timestamps when present
         shell: bash
         run: |
           set -euo pipefail
-          find source/staging_dir -type f -exec touch {} +
+          if [[ -d source/staging_dir ]]; then
+            find source/staging_dir -type f -exec touch {} +
+            echo "Staging directory present; timestamps normalized"
+          else
+            echo "No staging cache restored; skipping timestamp normalization"
+          fi
       - name: Report cache restore results
         shell: bash
         run: |
