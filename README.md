@@ -64,3 +64,19 @@
 构建命令与源码地址将在验证后写入，不在此阶段猜测或硬编码。
 
 
+
+## Honk Full / BPF integration (configuration stage)
+
+- Honk OpenWrt feed pinned to `daeuniverse/openwrt-packages` commit `e104a4930c5fc4f625f3355257626495685424f5`
+- Selected: `honk`, `luci-app-honk`, `vmlinux-btf-builtin`, and TC/eBPF kernel modules
+- Honk package build features: upstream defaults + `ebpf` + `native-ui`; native UI embeds Doona and implies Native API. The package source Makefile is pinned by feed commit, not copied into this repository.
+- Kernel fragment: `config/kernel-bpf.fragment` enables BPF syscall/JIT, TC classifier/action, ingress, veth, and BTF.
+- Preparation script: `scripts/prepare-honk-build.sh` adds the pinned feed, applies the kernel config fragment idempotently, and installs Honk package definitions.
+
+### Important BTF check
+
+The router's running kernel was read-only checked: `/sys/kernel/btf/vmlinux` exists on kernel `6.6.95`. This proves the current running kernel has BTF, not that a future 6.12 build will. The build config explicitly enables `CONFIG_DEBUG_INFO_BTF=y`; after the first boot, re-check `/sys/kernel/btf/vmlinux` before enabling Honk.
+
+The new workflow `validate-honk-config.yml` performs feed preparation and `make defconfig` package-selection checks only. It does **not** build firmware or flash.
+
+

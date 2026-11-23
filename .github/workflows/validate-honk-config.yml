@@ -1,0 +1,53 @@
+name: Validate Honk Full Configuration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  config-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout configuration
+        uses: actions/checkout@v4
+
+      - name: Clone pinned ImmortalWrt source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=https://github.com/shiyu1314/openwrt-source
+          REF=v25.12.6
+          EXPECTED=8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+          git clone --filter=blob:none --no-checkout "$SOURCE" source
+          git -C source fetch --depth=1 origin "$REF"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED"
+
+      - name: Prepare pinned Honk feed and BPF kernel config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/prepare-honk-build.sh source/scripts/
+          cp config/kernel-bpf.fragment source/config/
+          cp config/diffconfig source/config/
+          chmod +x source/scripts/prepare-honk-build.sh
+          cd source
+          bash scripts/prepare-honk-build.sh
+
+      - name: Run defconfig and verify package selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          cp config/diffconfig .config
+          make defconfig
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y$' .config
+          grep -q '^CONFIG_PACKAGE_honk=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-honk=y$' .config
+          grep -q '^CONFIG_PACKAGE_vmlinux-btf-builtin=y$' .config
+          grep -q '^CONFIG_PACKAGE_kmod-sched-bpf=y$' .config
+          grep -q '^CONFIG_PACKAGE_kmod-veth=y$' .config
+          echo 'Honk Full package selection and NAND profile passed defconfig.'
+          echo 'This workflow does not compile firmware or publish artifacts.'

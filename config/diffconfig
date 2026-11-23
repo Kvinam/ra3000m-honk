@@ -1,4 +1,18 @@
-﻿CONFIG_TARGET_mediatek=y
+CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
 CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y
 # NAND-only profile: never enable the eMMC or 256M NAND profile.
+
+# Honk Full: embedded eBPF + Native API + embedded Doona UI (package default features)
+CONFIG_PACKAGE_honk=y
+CONFIG_PACKAGE_luci-app-honk=y
+CONFIG_PACKAGE_vmlinux-btf-builtin=y
+
+# Honk TC/eBPF dependencies (also pulled by package dependencies)
+CONFIG_PACKAGE_kmod-veth=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
+CONFIG_PACKAGE_kmod-nft-core=y
+CONFIG_PACKAGE_kmod-nft-queue=y
+CONFIG_PACKAGE_kmod-nfnetlink-queue=y
+CONFIG_PACKAGE_kmod-nf-conntrack=y
