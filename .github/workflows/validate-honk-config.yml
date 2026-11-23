@@ -1,6 +1,17 @@
 name: Validate Honk Full Configuration
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'config/**'
+      - 'scripts/**'
+      - '.github/workflows/validate-honk-config.yml'
+  pull_request:
+    paths:
+      - 'config/**'
+      - 'scripts/**'
+      - '.github/workflows/validate-honk-config.yml'
   workflow_dispatch:
 
 permissions:
@@ -100,7 +111,27 @@ jobs:
             echo 'Validation failed.'
             exit 1
           fi
-          echo 'PASS: target, Honk package and BPF/BTF fragment checks.'
+          echo '--- Device profile selection checks ---
+          device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
+          if grep -qx "${device}=y" .config; then
+            echo "PASS: ${device}=y selected"
+          else
+            echo "FAIL: ${device} not selected"
+            failed=1
+          fi
+          for forbidden in CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-256m-nand; do
+            if grep -qx "${forbidden}=y" .config; then
+              echo "FAIL: unintended profile ${forbidden}=y"
+              failed=1
+            else
+              echo "PASS: ${forbidden} not selected"
+            fi
+          done
+          if [[ "${failed}" -ne 0 ]]; then
+            echo 'Validation failed.'
+            exit 1
+          fi
+          echo 'PASS: exact NAND profile, Honk package and BPF/BTF fragment checks.'
           echo 'No firmware compilation or publishing is performed.'
 
       - name: Upload config and feed diagnostics
