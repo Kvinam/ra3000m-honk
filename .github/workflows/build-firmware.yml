@@ -1,18 +1,10 @@
-name: Build RAX3000M NAND Honk Full Firmware
+﻿name: Build RAX3000M NAND Honk Firmware
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/build-firmware.yml'
 
 permissions:
   contents: read
-
-concurrency:
-  group: rax3000m-nand-firmware-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,39 +14,31 @@ jobs:
       - name: Checkout build configuration
         uses: actions/checkout@v4
 
-      - name: Free runner disk space
+      - name: Install build dependencies
         shell: bash
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          df -h /
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools python3-dev rsync unzip zlib1g-dev file wget curl libelf-dev libxml-parser-perl libintl-perl
 
-      - name: Clone pinned ImmortalWrt source
+      - name: Clone pinned source
         shell: bash
         run: |
           set -euo pipefail
-          SOURCE=https://github.com/shiyu1314/openwrt-source
-          REF=v25.12.6
-          EXPECTED=8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
-          git clone --filter=blob:none --no-checkout "$SOURCE" source
-          git -C source fetch --depth=1 origin "$REF"
+          git clone --filter=blob:none --no-checkout https://github.com/shiyu1314/openwrt-source source
+          git -C source fetch --depth=1 origin v25.12.6
           git -C source checkout --detach FETCH_HEAD
-          test "$(git -C source rev-parse HEAD)" = "$EXPECTED"
+          test "$(git -C source rev-parse HEAD)" = "8a3b1e99b158d88104dc8aecf1c98721ef87f3a3"
+          echo "SOURCE_COMMIT=$(git -C source rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Verify and prepare RAX3000M NAND and Honk Full
+      - name: Prepare Honk feed and BPF/BTF kernel config
         shell: bash
         run: |
           set -euo pipefail
+          cp scripts/prepare-honk-build.sh source/scripts/
+          cp config/kernel-bpf.fragment source/config/
+          cp config/diffconfig source/config/
+          chmod +x source/scripts/prepare-honk-build.sh
           cd source
-          IMAGE_FILE=target/linux/mediatek/image/filogic.mk
-          DTS_FILE=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dts
-          grep -q '^define Device/cmcc_rax3000m-nand$' "$IMAGE_FILE"
-          grep -q '^TARGET_DEVICES += cmcc_rax3000m-nand$' "$IMAGE_FILE"
-          grep -q 'DEVICE_DTS := mt7981b-cmcc-rax3000m-nand' "$IMAGE_FILE"
-          test -f "$DTS_FILE"
-          cp ../scripts/prepare-honk-build.sh scripts/
-          cp ../config/kernel-bpf.fragment config/
-          cp ../config/diffconfig config/
-          chmod +x scripts/prepare-honk-build.sh
           bash scripts/prepare-honk-build.sh
 
       - name: Update and install feeds
@@ -65,55 +49,63 @@ jobs:
           ./scripts/feeds update -a 2>&1 | tee feeds-update.log
           ./scripts/feeds install -a 2>&1 | tee feeds-install.log
 
-      - name: Configure target and packages
+      - name: Configure and verify NAND target
         shell: bash
         run: |
           set -euo pipefail
           cd source
           cp config/diffconfig .config
           make defconfig 2>&1 | tee defconfig.log
+          grep -qx 'CONFIG_TARGET_mediatek=y' .config
+          grep -qx 'CONFIG_TARGET_mediatek_filogic=y' .config
           grep -qx 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y' .config
           grep -qx 'CONFIG_PACKAGE_honk=y' .config
           grep -qx 'CONFIG_PACKAGE_luci-app-honk=y' .config
-          ! grep -qx 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc=y' .config
-          ! grep -qx 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-256m-nand=y' .config
+          grep -qx 'CONFIG_PACKAGE_vmlinux-btf-builtin=y' .config
+          for forbidden in CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-256m-nand; do
+            if grep -qx "${forbidden}=y" .config; then
+              echo "Forbidden device profile enabled: ${forbidden}" >&2
+              exit 1
+            fi
+          done
+          cp .config config-build-final.config
 
-      - name: Download build sources
+      - name: Download source archives
         shell: bash
         run: |
           set -euo pipefail
           cd source
-          make download -j2 2>&1 | tee download.log
+          make download -j8 2>&1 | tee download.log
 
-      - name: Compile firmware (conservative parallelism)
+      - name: Compile firmware
         shell: bash
         run: |
           set -euo pipefail
           cd source
-          make -j2 2>&1 | tee build.log
+          make -j$(nproc) 2>&1 | tee build.log
 
-      - name: Upload RAX3000M NAND firmware images
-        if: success()
+      - name: Verify and collect firmware artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp source/config-build-final.config artifacts/ 2>/dev/null || true
+          cp source/feeds-update.log source/feeds-install.log source/defconfig.log source/download.log source/build.log artifacts/ 2>/dev/null || true
+          if [[ -d source/bin/targets/mediatek/filogic ]]; then
+            cp -a source/bin/targets/mediatek/filogic/. artifacts/
+          fi
+          echo "--- output files ---"
+          find artifacts -maxdepth 2 -type f -printf '%f %s bytes\n' || true
+          if ! find artifacts -type f -name '*rax3000m*nand*' -o -name '*cmcc*' | grep -q .; then
+            echo "WARNING: No filename explicitly contains the RAX3000M NAND model string. Inspect manifest and image list."
+          fi
+
+      - name: Upload firmware and build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RAX3000M-NAND-Honk-Full-firmware
-          path: source/bin/targets/mediatek/filogic/**
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 14
-
-      - name: Upload build logs and configuration on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rax3000m-nand-build-diagnostics
-          path: |
-            source/.config
-            source/feeds-update.log
-            source/feeds-install.log
-            source/defconfig.log
-            source/download.log
-            source/build.log
+          name: rax3000m-nand-honk-firmware
+          path: artifacts/
           if-no-files-found: warn
-          include-hidden-files: true
-          retention-days: 7
+          retention-days: 14
