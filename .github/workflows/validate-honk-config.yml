@@ -111,7 +111,8 @@ jobs:
             echo 'Validation failed.'
             exit 1
           fi
-          echo '--- Device profile selection checks ---
+          echo '--- Device profile selection checks ---'
+
           device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
           if grep -qx "${device}=y" .config; then
             echo "PASS: ${device}=y selected"
