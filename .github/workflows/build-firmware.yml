@@ -60,12 +60,14 @@ jobs:
           restore-keys: |
             openwrt-dl-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ccache
-          key: ccache-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment') }}
+          path: /home/runner/.cache/ccache
+          key: ccache-v2-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ccache-v2-${{ runner.os }}-
             ccache-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
 
       - name: Verify NAND profile and DTS
@@ -185,6 +187,12 @@ jobs:
         run: |
           mkdir -p source
           ccache -s | tee source/ccache-stats.log
+      - name: Save ccache (even after build failure)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/ccache
+          key: ccache-v2-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save compatible staging cache
         if: success()
         uses: actions/cache/save@v4
