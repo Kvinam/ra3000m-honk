@@ -36,18 +36,52 @@ jobs:
           cd source
           bash scripts/prepare-honk-build.sh
 
-      - name: Run defconfig and verify package selection
+      - name: Run defconfig and report missing selections
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd source
           cp config/diffconfig .config
-          make defconfig
-          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y$' .config
-          grep -q '^CONFIG_PACKAGE_honk=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-honk=y$' .config
-          grep -q '^CONFIG_PACKAGE_vmlinux-btf-builtin=y$' .config
-          grep -q '^CONFIG_PACKAGE_kmod-sched-bpf=y$' .config
-          grep -q '^CONFIG_PACKAGE_kmod-veth=y$' .config
+          if make defconfig; then
+            echo 'make defconfig completed.'
+          else
+            echo 'make defconfig FAILED; will upload diagnostics.'
+            exit 1
+          fi
+          required=(
+            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
+            CONFIG_PACKAGE_honk
+            CONFIG_PACKAGE_luci-app-honk
+            CONFIG_PACKAGE_vmlinux-btf-builtin
+            CONFIG_PACKAGE_kmod-sched-bpf
+            CONFIG_PACKAGE_kmod-veth
+          )
+          missing=0
+          for symbol in "${required[@]}"; do
+            if grep -qx "${symbol}=y" .config; then
+              echo "PASS: ${symbol}=y"
+            else
+              echo "MISSING: ${symbol} expected y; actual config:"
+              grep -E "^${symbol}=(y|m)$|^# ${symbol} is not set$" .config || echo "  (symbol absent)"
+              missing=1
+            fi
+          done
+          echo '--- Relevant final .config symbols ---'
+          grep -E '^(CONFIG_TARGET_(mediatek|mediatek_filogic|DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand)|CONFIG_PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth))=|^# CONFIG_(TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand|PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth)) is not set$' .config || true
+          if [[ "$missing" -ne 0 ]]; then
+            echo 'Defconfig validation failed: required symbols were not selected.'
+            exit 1
+          fi
           echo 'Honk Full package selection and NAND profile passed defconfig.'
-          echo 'This workflow does not compile firmware or publish artifacts.'
+          echo 'This workflow does not compile firmware or publish firmware images.'
+
+      - name: Upload config and feed diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: honk-defconfig-diagnostics
+          path: |
+            source/.config
+            source/logs/feeds/daeuniverse/**/dump.txt
+          if-no-files-found: warn
+          retention-days: 7
