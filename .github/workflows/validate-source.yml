@@ -1,0 +1,43 @@
+name: Audit RAX3000M NAND Source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-source:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout config repository
+        uses: actions/checkout@v4
+
+      - name: Validate local NAND-only profile
+        shell: pwsh
+        run: ./scripts/verify-nand-profile.ps1
+
+      - name: Clone pinned source and audit NAND profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_REPO=https://github.com/shiyu1314/openwrt-source
+          SOURCE_REF=v25.12.6
+          EXPECTED_COMMIT=8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+          git clone --filter=blob:none --no-checkout "$SOURCE_REPO" source
+          git -C source fetch --depth=1 origin "$SOURCE_REF"
+          git -C source checkout --detach FETCH_HEAD
+          ACTUAL_COMMIT=$(git -C source rev-parse HEAD)
+          echo "Checked source commit: $ACTUAL_COMMIT"
+          test "$ACTUAL_COMMIT" = "$EXPECTED_COMMIT"
+          DTS=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dtso
+          RECIPE=target/linux/mediatek/image/filogic.mk
+          test -f "$DTS"
+          grep -q 'compatible = "cmcc,rax3000m"' "$DTS"
+          grep -q 'label = "ubi"' "$DTS"
+          grep -q 'partition@580000' "$DTS"
+          grep -q 'define Device/cmcc_rax3000m-nand' "$RECIPE"
+          grep -q 'TARGET_DEVICES += cmcc_rax3000m-nand' "$RECIPE"
+          grep -q 'IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata' "$RECIPE"
+          echo 'NAND RAX3000M profile/DTS/image recipe checks passed.'
+          echo 'Audit only: no firmware build, upload, or flashing.'

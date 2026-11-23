@@ -1,0 +1,22 @@
+﻿# Local build artifacts and temporary files
+/bin/
+/build_dir/
+/staging_dir/
+/tmp/
+/dl/
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+credentials*
+secrets*
+
+# Editor/IDE
+.vscode/
+.idea/
