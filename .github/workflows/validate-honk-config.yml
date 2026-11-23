@@ -25,25 +25,6 @@ jobs:
           git -C source checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$EXPECTED"
 
-      - name: Prepare pinned Honk feed and BPF kernel config
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp scripts/prepare-honk-build.sh source/scripts/
-          cp config/kernel-bpf.fragment source/config/
-          cp config/diffconfig source/config/
-          chmod +x source/scripts/prepare-honk-build.sh
-          cd source
-          bash scripts/prepare-honk-build.sh
-
-      - name: Update and install all feeds (upstream reference order)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd source
-          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
-          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
-
       - name: Verify RAX3000M NAND source profile and DTS
         shell: bash
         run: |
