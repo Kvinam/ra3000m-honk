@@ -1,4 +1,4 @@
-name: Build RAX3000M NAND Honk Firmware
+﻿name: Build RAX3000M NAND Honk Firmware
 
 on:
   workflow_dispatch:
@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build-firmware.yml'
+      - 'config/diffconfig'
+      - 'config/kernel-bpf.fragment'
+      - 'scripts/prepare-honk-build.sh'
 
 permissions:
   contents: read
@@ -13,6 +16,11 @@ permissions:
 concurrency:
   group: rax3000m-nand-firmware-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  SOURCE_COMMIT: 8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+  OVERLAY_COMMIT: 3e9480c061bcc92f6fa260920b189c22a6f04a9b
+  HONK_COMMIT: e104a4930c5fc4f625f3355257626495685424f5
 
 jobs:
   build:
@@ -32,7 +40,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools python3-dev rsync unzip zlib1g-dev file wget curl libelf-dev libxml-parser-perl libintl-perl
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools python3-dev rsync unzip zlib1g-dev file wget curl libelf-dev libxml-parser-perl libintl-perl ccache
 
       - name: Clone pinned source
         shell: bash
@@ -41,8 +49,24 @@ jobs:
           git clone --filter=blob:none --no-checkout https://github.com/shiyu1314/openwrt-source source
           git -C source fetch --depth=1 origin v25.12.6
           git -C source checkout --detach FETCH_HEAD
-          test "$(git -C source rev-parse HEAD)" = "8a3b1e99b158d88104dc8aecf1c98721ef87f3a3"
-          echo "SOURCE_COMMIT=$(git -C source rev-parse HEAD)" >> "$GITHUB_ENV"
+          test "$(git -C source rev-parse HEAD)" = "${SOURCE_COMMIT}"
+          echo "Verified source pin: ${SOURCE_COMMIT}"
+
+      - name: Cache source downloads (dl)
+        uses: actions/cache@v4
+        with:
+          path: source/dl
+          key: openwrt-dl-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}
+          restore-keys: |
+            openwrt-dl-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment') }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
 
       - name: Verify NAND profile and DTS
         shell: bash
@@ -89,6 +113,9 @@ jobs:
           grep -qx 'CONFIG_PACKAGE_honk=y' .config
           grep -qx 'CONFIG_PACKAGE_luci-app-honk=y' .config
           grep -qx 'CONFIG_PACKAGE_vmlinux-btf-builtin=y' .config
+          grep -qx 'CONFIG_DEVEL=y' .config
+          grep -qx 'CONFIG_CCACHE=y' .config
+          grep -qx 'CONFIG_CCACHE_DIR="/home/runner/.cache/ccache"' .config
           for forbidden in CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-256m-nand; do
             if grep -qx "${forbidden}=y" .config; then
               echo "Forbidden device profile enabled: ${forbidden}" >&2
@@ -97,6 +124,18 @@ jobs:
           done
           cp .config config-build-final.config
 
+      - name: Cache compatible staging directory
+        uses: actions/cache/restore@v4
+        with:
+          path: source/staging_dir
+          key: staging-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}
+
+      - name: Normalize staging cache timestamps
+        if: steps.staging-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find source/staging_dir -type f -exec touch {} +
       - name: Download source archives
         shell: bash
         run: |
@@ -104,31 +143,77 @@ jobs:
           cd source
           make download -j8 2>&1 | tee download.log
 
-      - name: Compile firmware
+      - name: Compile firmware with automatic fallback and verbose diagnostics
         shell: bash
+        env:
+          CCACHE_DIR: /home/runner/.cache/ccache
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd source
-          make -j$(nproc) 2>&1 | tee build.log
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 5G
+          ccache -z
+          echo "ccache status before build:"
+          ccache -s
+          THREADS="$(nproc)"
+          echo "Attempt 1: make -j${THREADS}"
+          if make -j"${THREADS}" 2>&1 | tee build-parallel.log; then
+            echo "BUILD_RESULT=success-parallel" >> "$GITHUB_ENV"
+          else
+            echo "Parallel build failed; retrying safely with -j1"
+            if make -j1 2>&1 | tee build-single.log; then
+              echo "BUILD_RESULT=success-single" >> "$GITHUB_ENV"
+            else
+              echo "Single-thread build failed; collecting verbose diagnostics with -j1 V=s"
+              if make -j1 V=s 2>&1 | tee build-verbose.log; then
+                echo "BUILD_RESULT=success-verbose" >> "$GITHUB_ENV"
+              else
+                echo "BUILD_RESULT=failure" >> "$GITHUB_ENV"
+                exit 1
+              fi
+            fi
+          fi
+          echo "ccache status after build:"
+          ccache -s
+
+      - name: Collect ccache statistics
+        if: always()
+        shell: bash
+        env:
+          CCACHE_DIR: /home/runner/.cache/ccache
+        run: |
+          mkdir -p source
+          ccache -s | tee source/ccache-stats.log
+      - name: Save compatible staging cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: source/staging_dir
+          key: staging-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}
 
       - name: Verify and collect firmware artifacts
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts
+          mkdir -p artifacts/logs
           cp source/config-build-final.config artifacts/ 2>/dev/null || true
-          cp source/feeds-update.log source/feeds-install.log source/defconfig.log source/download.log source/build.log artifacts/ 2>/dev/null || true
-          if [[ -d source/bin/targets/mediatek/filogic ]]; then
+          cp source/feeds-update.log source/feeds-install.log source/defconfig.log source/download.log artifacts/logs/ 2>/dev/null || true
+          cp source/build*.log source/ccache-stats.log artifacts/logs/ 2>/dev/null || true
+          cp source/config-build-final.config artifacts/logs/ 2>/dev/null || true
+          if [[ "${{ job.status }}" == "success" && -d source/bin/targets/mediatek/filogic ]]; then
             cp -a source/bin/targets/mediatek/filogic/. artifacts/
           fi
-          echo "--- output files ---"
-          find artifacts -maxdepth 2 -type f -printf '%f %s bytes\n' || true
+          echo "--- collected files ---"
+          find artifacts -type f -printf '%p %s bytes\n' || true
           if [[ "${{ job.status }}" == "success" ]]; then
-            if ! find artifacts -type f \( -name '*sysupgrade*' -o -name '*cmcc*' \) | grep -q .; then
-              echo "ERROR: No sysupgrade image artifact was found." >&2
+            IMAGE="$(find artifacts -type f \( -name '*sysupgrade*' -o -name '*cmcc*' \) | head -n 1)"
+            if [[ -z "${IMAGE}" ]]; then
+              echo "ERROR: No NAND sysupgrade/device image found." >&2
               exit 1
             fi
+            find artifacts -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > artifacts/SHA256SUMS
+            echo "Verified image candidate: ${IMAGE}"
           fi
 
       - name: Upload firmware and build logs
