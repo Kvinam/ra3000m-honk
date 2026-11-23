@@ -1,4 +1,4 @@
-ame: Validate Honk Full Configuration
+name: Validate Honk Full Configuration
 
 on:
   workflow_dispatch:
