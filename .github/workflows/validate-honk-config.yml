@@ -78,7 +78,7 @@ jobs:
           required=(
             CONFIG_TARGET_mediatek
             CONFIG_TARGET_mediatek_filogic
-            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
+            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m_nand
             CONFIG_PACKAGE_honk
             CONFIG_PACKAGE_luci-app-honk
             CONFIG_PACKAGE_vmlinux-btf-builtin
@@ -114,7 +114,7 @@ jobs:
           fi
           echo '--- Device profile selection checks ---'
 
-          device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
+          device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m_nand
           if grep -qx "${device}=y" .config; then
             echo "PASS: ${device}=y selected"
           else
