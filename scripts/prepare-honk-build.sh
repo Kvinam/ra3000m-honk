@@ -30,9 +30,6 @@ while IFS= read -r setting; do
   printf "%s\n" "$setting" >> "$KERNEL_CONFIG"
 done < "$FRAGMENT"
 
-./scripts/feeds update daeuniverse
-./scripts/feeds install honk luci-app-honk vmlinux-btf-builtin
-
-echo "Honk feed pinned and package definitions installed."
-echo "BPF/BTF options appended idempotently to Filogic config-6.12."
+echo "Pinned Honk feed added; BPF/BTF fragment applied."
+echo "Feed update/install and defconfig are handled by the workflow."
 echo "This script does not compile or flash firmware."

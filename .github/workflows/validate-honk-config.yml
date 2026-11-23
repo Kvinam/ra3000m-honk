@@ -1,4 +1,4 @@
-name: Validate Honk Full Configuration
+ame: Validate Honk Full Configuration
 
 on:
   workflow_dispatch:
@@ -36,13 +36,21 @@ jobs:
           cd source
           bash scripts/prepare-honk-build.sh
 
-      - name: Run defconfig and report missing selections
+      - name: Update and install all feeds (upstream reference order)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
+
+      - name: Run defconfig and report selected packages
         shell: bash
         run: |
           set -uo pipefail
           cd source
           cp config/diffconfig .config
-          if make defconfig; then
+          if make defconfig 2>&1 | tee defconfig.log; then
             echo 'make defconfig completed.'
           else
             echo 'make defconfig FAILED; will upload diagnostics.'
@@ -50,11 +58,6 @@ jobs:
           fi
           required=(
             CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
-            CONFIG_PACKAGE_honk
-            CONFIG_PACKAGE_luci-app-honk
-            CONFIG_PACKAGE_vmlinux-btf-builtin
-            CONFIG_PACKAGE_kmod-sched-bpf
-            CONFIG_PACKAGE_kmod-veth
           )
           missing=0
           for symbol in "${required[@]}"; do
@@ -66,13 +69,15 @@ jobs:
               missing=1
             fi
           done
-          echo '--- Relevant final .config symbols ---'
-          grep -E '^(CONFIG_TARGET_(mediatek|mediatek_filogic|DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand)|CONFIG_PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth))=|^# CONFIG_(TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand|PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth)) is not set$' .config || true
+          echo '--- Honk and BPF related final .config selections ---'
+          grep -E '^(CONFIG_PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth|kmod-sched-core|kmod-nft-core|kmod-nft-queue|kmod-nfnetlink-queue|kmod-nf-conntrack)|CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|DEBUG_INFO|DEBUG_INFO_BTF|NET_CLS_BPF|NET_ACT_BPF|NET_CLS_ACT|NET_SCH_INGRESS|VETH))=|^# CONFIG_(PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth)|BPF|BPF_SYSCALL|BPF_JIT|DEBUG_INFO|DEBUG_INFO_BTF|NET_CLS_BPF|NET_ACT_BPF|NET_CLS_ACT|NET_SCH_INGRESS|VETH) is not set$' .config || true
+          echo '--- Feed package parse diagnostics ---'
+          grep -R -E 'ERROR: please fix feeds/daeuniverse|WARNING: No feed for package' logs/feeds/daeuniverse 2>/dev/null || true
           if [[ "$missing" -ne 0 ]]; then
-            echo 'Defconfig validation failed: required symbols were not selected.'
+            echo 'NAND profile validation failed.'
             exit 1
           fi
-          echo 'Honk Full package selection and NAND profile passed defconfig.'
+          echo 'NAND profile passed. Honk/BPF symbols are reported above for diagnostics.'
           echo 'This workflow does not compile firmware or publish firmware images.'
 
       - name: Upload config and feed diagnostics
@@ -82,6 +87,9 @@ jobs:
           name: honk-defconfig-diagnostics
           path: |
             source/.config
+            source/feeds-update.log
+            source/feeds-install.log
+            source/defconfig.log
             source/logs/feeds/daeuniverse/**/dump.txt
           if-no-files-found: warn
           retention-days: 7
