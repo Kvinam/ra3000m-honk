@@ -1,4 +1,4 @@
-﻿name: Build RAX3000M NAND Honk Firmware
+name: Build RAX3000M NAND Honk Firmware
 
 on:
   workflow_dispatch:
@@ -125,6 +125,7 @@ jobs:
           cp .config config-build-final.config
 
       - name: Cache compatible staging directory
+        id: staging-cache
         uses: actions/cache/restore@v4
         with:
           path: source/staging_dir
