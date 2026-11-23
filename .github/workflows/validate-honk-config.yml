@@ -44,41 +44,83 @@ jobs:
           ./scripts/feeds update -a 2>&1 | tee feeds-update.log
           ./scripts/feeds install -a 2>&1 | tee feeds-install.log
 
-      - name: Run defconfig and report selected packages
+      - name: Verify RAX3000M NAND source profile and DTS
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          cd source
+          IMAGE_FILE=target/linux/mediatek/image/filogic.mk
+          DTS_FILE=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dts
+          grep -q '^define Device/cmcc_rax3000m-nand$' "$IMAGE_FILE"
+          grep -q '^TARGET_DEVICES += cmcc_rax3000m-nand$' "$IMAGE_FILE"
+          grep -q 'DEVICE_DTS := mt7981b-cmcc-rax3000m-nand' "$IMAGE_FILE"
+          test -f "$DTS_FILE"
+          echo 'PASS: RAX3000M NAND profile definition and DTS verified.'
+
+      - name: Prepare pinned Honk feed and BPF kernel config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/prepare-honk-build.sh source/scripts/
+          cp config/kernel-bpf.fragment source/config/
+          cp config/diffconfig source/config/
+          chmod +x source/scripts/prepare-honk-build.sh
+          cd source
+          bash scripts/prepare-honk-build.sh
+
+      - name: Update and install all feeds (upstream reference order)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
+
+      - name: Run defconfig and validate target and Honk packages
+        shell: bash
+        run: |
+          set -euo pipefail
           cd source
           cp config/diffconfig .config
-          if make defconfig 2>&1 | tee defconfig.log; then
-            echo 'make defconfig completed.'
-          else
-            echo 'make defconfig FAILED; will upload diagnostics.'
-            exit 1
-          fi
+          make defconfig 2>&1 | tee defconfig.log
           required=(
-            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
+            CONFIG_TARGET_mediatek
+            CONFIG_TARGET_mediatek_filogic
+            CONFIG_PACKAGE_honk
+            CONFIG_PACKAGE_luci-app-honk
+            CONFIG_PACKAGE_vmlinux-btf-builtin
+            CONFIG_PACKAGE_kmod-veth
+            CONFIG_PACKAGE_kmod-sched-core
+            CONFIG_PACKAGE_kmod-sched-bpf
+            CONFIG_PACKAGE_kmod-nft-core
+            CONFIG_PACKAGE_kmod-nft-queue
+            CONFIG_PACKAGE_kmod-nfnetlink-queue
+            CONFIG_PACKAGE_kmod-nf-conntrack
           )
-          missing=0
+          failed=0
           for symbol in "${required[@]}"; do
             if grep -qx "${symbol}=y" .config; then
               echo "PASS: ${symbol}=y"
             else
-              echo "MISSING: ${symbol} expected y; actual config:"
-              grep -E "^${symbol}=(y|m)$|^# ${symbol} is not set$" .config || echo "  (symbol absent)"
-              missing=1
+              echo "FAIL: ${symbol} missing/not enabled"
+              failed=1
             fi
           done
-          echo '--- Honk and BPF related final .config selections ---'
-          grep -E '^(CONFIG_PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth|kmod-sched-core|kmod-nft-core|kmod-nft-queue|kmod-nfnetlink-queue|kmod-nf-conntrack)|CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|DEBUG_INFO|DEBUG_INFO_BTF|NET_CLS_BPF|NET_ACT_BPF|NET_CLS_ACT|NET_SCH_INGRESS|VETH))=|^# CONFIG_(PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-veth)|BPF|BPF_SYSCALL|BPF_JIT|DEBUG_INFO|DEBUG_INFO_BTF|NET_CLS_BPF|NET_ACT_BPF|NET_CLS_ACT|NET_SCH_INGRESS|VETH) is not set$' .config || true
-          echo '--- Feed package parse diagnostics ---'
-          grep -R -E 'ERROR: please fix feeds/daeuniverse|WARNING: No feed for package' logs/feeds/daeuniverse 2>/dev/null || true
-          if [[ "$missing" -ne 0 ]]; then
-            echo 'NAND profile validation failed.'
+          echo '--- BPF/BTF kernel fragment checks ---'
+          for symbol in CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_NET_CLS_BPF CONFIG_NET_ACT_BPF CONFIG_NET_CLS_ACT CONFIG_NET_SCH_INGRESS CONFIG_VETH CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF; do
+            if grep -qx "${symbol}=y" config/kernel-bpf.fragment || grep -qx "${symbol}=m" config/kernel-bpf.fragment; then
+              echo "PASS: ${symbol} requested"
+            else
+              echo "FAIL: ${symbol} missing from fragment"
+              failed=1
+            fi
+          done
+          if [[ "${failed}" -ne 0 ]]; then
+            echo 'Validation failed.'
             exit 1
           fi
-          echo 'NAND profile passed. Honk/BPF symbols are reported above for diagnostics.'
-          echo 'This workflow does not compile firmware or publish firmware images.'
+          echo 'PASS: target, Honk package and BPF/BTF fragment checks.'
+          echo 'No firmware compilation or publishing is performed.'
 
       - name: Upload config and feed diagnostics
         if: always()
