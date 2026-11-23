@@ -1,4 +1,4 @@
-﻿name: Validate Honk Full Configuration
+name: Validate Honk Full Configuration
 
 on:
   push:
@@ -78,7 +78,7 @@ jobs:
           required=(
             CONFIG_TARGET_mediatek
             CONFIG_TARGET_mediatek_filogic
-            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m_nand
+            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
             CONFIG_PACKAGE_honk
             CONFIG_PACKAGE_luci-app-honk
             CONFIG_PACKAGE_vmlinux-btf-builtin
@@ -114,7 +114,7 @@ jobs:
           fi
           echo '--- Device profile selection checks ---'
 
-          device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m_nand
+          device=CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand
           if grep -qx "${device}=y" .config; then
             echo "PASS: ${device}=y selected"
           else
@@ -150,4 +150,5 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
+
 
