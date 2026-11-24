@@ -253,6 +253,58 @@ jobs:
           test "$ACTUAL" = "$HONK_SOURCE_COMMIT"
           echo "PASS: Honk source pinned at $ACTUAL"
 
+      # Honk pins both the application and eBPF Rust toolchains. The stable
+      # toolchain must include the OpenWrt target's core/std libraries; the
+      # nested nightly toolchain builds the BPF object from rust-src.
+      - name: Install pinned Honk Rust toolchains
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.99.1
+          target: aarch64-unknown-linux-musl
+
+      - name: Install pinned Honk eBPF Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: nightly-2026-10-20
+          components: rust-src, llvm-tools
+
+      - name: Restore Honk Cargo dependency cache
+        id: honk-cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /home/runner/.cargo/registry
+            /home/runner/.cargo/git
+          key: honk-cargo-v1-${{ runner.os }}-${{ hashFiles('source/feeds/daeuniverse/honk/Cargo.lock', 'source/feeds/daeuniverse/honk/crates/honk-ebpf/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            honk-cargo-v1-${{ runner.os }}-${{ hashFiles('source/feeds/daeuniverse/honk/Cargo.lock', 'source/feeds/daeuniverse/honk/crates/honk-ebpf/Cargo.lock') }}-
+
+      - name: Install pinned bpf-linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          BPF_LINKER_VERSION=0.11.0
+          BPF_LINKER_SHA256=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          ARCHIVE="$RUNNER_TEMP/bpf-linker.tar.zst"
+          curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "$BPF_LINKER_SHA256  $ARCHIVE" | sha256sum -c -
+          mkdir -p "$CARGO_HOME/bin"
+          zstd -dc "$ARCHIVE" | tar -xf - -C "$CARGO_HOME/bin"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          "$CARGO_HOME/bin/bpf-linker" --version
+
+      - name: Verify Honk Rust cross toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup run 1.99.1 rustc --version
+          rustup target list --toolchain 1.99.1 --installed
+          rustup run 1.99.1 rustc --print target-libdir --target aarch64-unknown-linux-musl
+          test -d "$(rustup run 1.99.1 rustc --print target-libdir --target aarch64-unknown-linux-musl)"
+          rustup run nightly-2026-10-20 rustc --version
+          bpf-linker --version
       - name: Configure and verify NAND target
         shell: bash
         run: |
@@ -503,6 +555,14 @@ jobs:
         with:
           path: /home/runner/.cache/ccache
           key: ccache-v2-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save Honk Cargo dependency cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /home/runner/.cargo/registry
+            /home/runner/.cargo/git
+          key: honk-cargo-v1-${{ runner.os }}-${{ hashFiles('source/feeds/daeuniverse/honk/Cargo.lock', 'source/feeds/daeuniverse/honk/crates/honk-ebpf/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save compatible staging cache
         if: success()
         uses: actions/cache/save@v4

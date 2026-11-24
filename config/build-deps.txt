@@ -22,3 +22,7 @@ libelf-dev
 libxml-parser-perl
 libintl-perl
 ccache
+cmake
+libclang-dev
+llvm
+zstd
