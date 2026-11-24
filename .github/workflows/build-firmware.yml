@@ -69,7 +69,7 @@ jobs:
           if [[ -f /etc/apt/apt-mirrors.txt ]]; then
             echo "APT mirror list before normalization:"
             cat /etc/apt/apt-mirrors.txt
-            sudo sed -i -E 's#https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu/?#https://archive.ubuntu.com/ubuntu/#g' /etc/apt/apt-mirrors.txt
+            sudo sed -i -E 's#https?://[^/]*\.archive\.ubuntu\.com/ubuntu/?#https://archive.ubuntu.com/ubuntu/#g' /etc/apt/apt-mirrors.txt
             echo "APT mirror list after normalization:"
             cat /etc/apt/apt-mirrors.txt
           fi
@@ -405,7 +405,8 @@ jobs:
                 exit 1
               fi
             else
-              echo "Non-OOM compile failure; skipping blind serial retry to avoid wasting time"
+              echo "Non-OOM compile failure; collecting focused Honk package diagnostics"
+              /usr/bin/time -v make -j1 package/feeds/daeuniverse/honk/compile V=s 2>&1 | tee build-honk-verbose.log || true
               echo "BUILD_RESULT=failure-parallel" >> "$GITHUB_ENV"
               exit 1
             fi
@@ -479,7 +480,7 @@ jobs:
           path: source/staging_dir
           key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save host tools and toolchain build cache
-        if: always() && steps.firmware-compile.outcome == 'success'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
