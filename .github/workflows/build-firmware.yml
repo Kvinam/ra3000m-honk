@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_COMMIT: 8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+  SOURCE_COMMIT: dc327b29f23cbee6c4dc41fef63656db0f7dba38
   OVERLAY_COMMIT: 3e9480c061bcc92f6fa260920b189c22a6f04a9b
   HONK_COMMIT: e104a4930c5fc4f625f3355257626495685424f5
   HONK_SOURCE_COMMIT: 64848881b7304e250e7a25422f4f1d86a5975eca
@@ -320,6 +320,10 @@ jobs:
           grep -qx 'CONFIG_PACKAGE_honk=y' .config
           grep -qx 'CONFIG_PACKAGE_luci-app-honk=y' .config
           grep -qx 'CONFIG_PACKAGE_vmlinux-btf-builtin=y' .config
+          KERNEL_CONFIG=target/linux/mediatek/filogic/config-6.12
+          grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
+          grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
+          echo "PASS: kernel config fragment requests DEBUG_INFO and DEBUG_INFO_BTF in $KERNEL_CONFIG"
           grep -qx 'CONFIG_DEVEL=y' .config
           grep -qx 'CONFIG_CCACHE=y' .config
           grep -qx 'CONFIG_CCACHE_DIR="/home/runner/.cache/ccache"' .config
@@ -485,6 +489,50 @@ jobs:
           wait "$MONITOR_PID" 2>/dev/null || true
           echo "ccache status after build:"
           ccache -s
+
+      - name: Verify compiled kernel BTF data
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          mkdir -p ../artifacts/logs
+          KERNEL_CONFIG_COUNT=0
+          while IFS= read -r KERNEL_CONFIG; do
+            echo "--- Generated kernel config: $KERNEL_CONFIG ---"
+            grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
+            grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
+            KERNEL_CONFIG_COUNT=$((KERNEL_CONFIG_COUNT + 1))
+          done < <(find build_dir/target-* -path '*/linux-*/.config' -type f -print 2>/dev/null)
+          if [[ "$KERNEL_CONFIG_COUNT" -eq 0 ]]; then
+            echo "ERROR: generated Linux kernel .config not found." >&2
+            exit 1
+          fi
+          echo "PASS: generated Linux kernel config enables DEBUG_INFO_BTF."
+          mapfile -t VMLINUX_FILES < <(find build_dir/target-* -name vmlinux -type f -print 2>/dev/null)
+          if [[ "${#VMLINUX_FILES[@]}" -eq 0 ]]; then
+            echo "ERROR: compiled kernel vmlinux not found; cannot verify BTF." >&2
+            find build_dir/target-* -maxdepth 5 -type f \( -name '.config' -o -name 'vmlinux' \) -print 2>/dev/null | tee ../artifacts/logs/btf-diagnostics.log || true
+            exit 1
+          fi
+          BTF_FOUND=0
+          {
+            echo "Kernel config: $KERNEL_CONFIG"
+            grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF)=' "$KERNEL_CONFIG"
+          } | tee ../artifacts/logs/btf-diagnostics.log
+          while IFS= read -r VMLINUX; do
+            echo "--- $VMLINUX ---" | tee -a ../artifacts/logs/btf-diagnostics.log
+            if readelf -SW "$VMLINUX" | grep -Eq '[[:space:]]\.BTF([[:space:]]|$)'; then
+              echo "PASS: BTF section found in $VMLINUX" | tee -a ../artifacts/logs/btf-diagnostics.log
+              BTF_FOUND=1
+            else
+              echo "No .BTF section in $VMLINUX" | tee -a ../artifacts/logs/btf-diagnostics.log
+            fi
+          done < <(find build_dir/target-* -name vmlinux -type f -print 2>/dev/null)
+          if [[ "$BTF_FOUND" -ne 1 ]]; then
+            echo "ERROR: no compiled vmlinux contains a .BTF section." >&2
+            exit 1
+          fi
+          echo "PASS: compiled kernel contains BTF type information."
 
       - name: Report target build directory footprint
         if: always()

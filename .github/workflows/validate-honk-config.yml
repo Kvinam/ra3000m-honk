@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           SOURCE=https://github.com/shiyu1314/openwrt-source
           REF=v25.12.6
-          EXPECTED=8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+          EXPECTED=dc327b29f23cbee6c4dc41fef63656db0f7dba38
           git clone --filter=blob:none --no-checkout "$SOURCE" source
           git -C source fetch --depth=1 origin "$REF"
           git -C source checkout --detach FETCH_HEAD
@@ -75,6 +75,10 @@ jobs:
           cd source
           cp config/diffconfig .config
           make defconfig 2>&1 | tee defconfig.log
+          KERNEL_CONFIG=target/linux/mediatek/filogic/config-6.12
+          grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
+          grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
+          echo "PASS: kernel config fragment requests DEBUG_INFO and DEBUG_INFO_BTF"
           required=(
             CONFIG_TARGET_mediatek
             CONFIG_TARGET_mediatek_filogic

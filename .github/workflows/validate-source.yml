@@ -23,21 +23,43 @@ jobs:
           set -euo pipefail
           SOURCE_REPO=https://github.com/shiyu1314/openwrt-source
           SOURCE_REF=v25.12.6
-          EXPECTED_COMMIT=8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+          EXPECTED_COMMIT=dc327b29f23cbee6c4dc41fef63656db0f7dba38
           git clone --filter=blob:none --no-checkout "$SOURCE_REPO" source
           git -C source fetch --depth=1 origin "$SOURCE_REF"
           git -C source checkout --detach FETCH_HEAD
           ACTUAL_COMMIT=$(git -C source rev-parse HEAD)
           echo "Checked source commit: $ACTUAL_COMMIT"
           test "$ACTUAL_COMMIT" = "$EXPECTED_COMMIT"
-          DTS=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dtso
+          DTS=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dts
+          OVERLAY=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dtso
           RECIPE=target/linux/mediatek/image/filogic.mk
+          TARGET=target/linux/mediatek/Makefile
           test -f "$DTS"
-          grep -q 'compatible = "cmcc,rax3000m"' "$DTS"
-          grep -q 'label = "ubi"' "$DTS"
-          grep -q 'partition@580000' "$DTS"
-          grep -q 'define Device/cmcc_rax3000m-nand' "$RECIPE"
-          grep -q 'TARGET_DEVICES += cmcc_rax3000m-nand' "$RECIPE"
-          grep -q 'IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata' "$RECIPE"
-          echo 'NAND RAX3000M profile/DTS/image recipe checks passed.'
+          test -f "$OVERLAY"
+          test -f "$RECIPE"
+          grep -Fq 'model = "CMCC RAX3000M (NAND version)";' "$DTS"
+          grep -Fq 'compatible = "cmcc,rax3000m-nand", "mediatek,mt7981";' "$DTS"
+          grep -Fq 'label = "bl2";' "$DTS"
+          grep -Fq 'reg = <0x00000 0x0100000>;' "$DTS"
+          grep -Fq 'label = "u-boot-env";' "$DTS"
+          grep -Fq 'reg = <0x100000 0x80000>;' "$DTS"
+          grep -Fq 'label = "factory";' "$DTS"
+          grep -Fq 'reg = <0x180000 0x200000>;' "$DTS"
+          grep -Fq 'label = "fip";' "$DTS"
+          grep -Fq 'reg = <0x380000 0x200000>;' "$DTS"
+          grep -Fq 'label = "ubi";' "$DTS"
+          grep -Fq 'reg = <0x580000 0x7200000>;' "$DTS"
+          grep -Fq 'rootdisk = <&ubi_rootdisk>;' "$OVERLAY"
+          grep -Fq 'volname = "fit";' "$OVERLAY"
+          grep -Fq 'define Device/cmcc_rax3000m-nand' "$RECIPE"
+          grep -Fq 'DEVICE_DTS := mt7981b-cmcc-rax3000m-nand' "$RECIPE"
+          grep -Fq 'UBINIZE_OPTS := -E 5' "$RECIPE"
+          grep -Fq 'BLOCKSIZE := 128k' "$RECIPE"
+          grep -Fq 'PAGESIZE := 2048' "$RECIPE"
+          grep -Fq 'IMAGE_SIZE := 116736k' "$RECIPE"
+          grep -Fq 'KERNEL_IN_UBI := 1' "$RECIPE"
+          grep -Fq 'TARGET_DEVICES += cmcc_rax3000m-nand' "$RECIPE"
+          grep -Fq 'IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata' "$RECIPE"
+          grep -Fq 'KERNEL_PATCHVER:=6.12' "$TARGET"
+          echo 'NAND RAX3000M DTS/partition/UBI/image/kernel checks passed.'
           echo 'Audit only: no firmware build, upload, or flashing.'
