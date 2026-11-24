@@ -22,6 +22,7 @@ env:
   SOURCE_COMMIT: 8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
   OVERLAY_COMMIT: 3e9480c061bcc92f6fa260920b189c22a6f04a9b
   HONK_COMMIT: e104a4930c5fc4f625f3355257626495685424f5
+  HONK_SOURCE_COMMIT: 64848881b7304e250e7a25422f4f1d86a5975eca
 
 jobs:
   build:
@@ -205,9 +206,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: source/feeds
-          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}
+            feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}
             feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
             feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-
 
@@ -235,6 +236,22 @@ jobs:
           test -s "$FEED_MANIFEST"
           echo "Feed revision manifest:"
           cat "$FEED_MANIFEST"
+
+      - name: Prepare pinned Honk source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          HONK_SRC="source/feeds/daeuniverse/honk/src"
+          mkdir -p "$(dirname "$HONK_SRC")"
+          if [[ ! -d "$HONK_SRC/.git" ]]; then
+            rm -rf "$HONK_SRC"
+            git clone --filter=blob:none --no-checkout https://github.com/daeuniverse/honk "$HONK_SRC"
+          fi
+          git -C "$HONK_SRC" fetch --depth 1 origin "$HONK_SOURCE_COMMIT"
+          git -C "$HONK_SRC" checkout --detach "$HONK_SOURCE_COMMIT"
+          ACTUAL="$(git -C "$HONK_SRC" rev-parse HEAD)"
+          test "$ACTUAL" = "$HONK_SOURCE_COMMIT"
+          echo "PASS: Honk source pinned at $ACTUAL"
 
       - name: Configure and verify NAND target
         shell: bash
@@ -417,6 +434,19 @@ jobs:
           echo "ccache status after build:"
           ccache -s
 
+      - name: Report target build directory footprint
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- target build directory footprint ---"
+          for path in source/build_dir/target-*; do
+            [[ -e "$path" ]] || continue
+            du -sh "$path" || true
+            du -sh "$path"/* 2>/dev/null | sort -h | tail -20 || true
+          done
+          echo "--- remaining disk space ---"
+          df -h / "$PWD"
       - name: Normalize APT archive cache permissions
         if: always()
         shell: bash
@@ -457,7 +487,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: source/feeds
-          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Collect ccache statistics
         if: always()
