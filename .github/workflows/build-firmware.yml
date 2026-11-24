@@ -607,10 +607,9 @@ jobs:
           wait "$MONITOR_PID" 2>/dev/null || true
           echo "ccache status after build (verbose reason counters):"
           ccache -s -v | tee ccache-stats.log
-          ccache -s -v | grep -Ei 'uncacheable|error|autoconf|called for|unsupported|preprocess|compiler|output|disabled|multiple source|bad argument' > ccache-log-summary.log || true
+          echo "ccache result reasons will be summarized in the post-build diagnostics step."
           echo "ccache directory footprint:"
           du -sh "$CCACHE_DIR" || true
-
       - name: Verify compiled kernel BTF data
         shell: bash
         run: |
@@ -636,7 +635,7 @@ jobs:
             exit 1
           fi
           # Inspect only the actual kernel build ELF, not target-level marker files.
-          mapfile -t VMLINUX_FILES < <(find build_dir/target-* -path '*/linux-*/vmlinux' -type f -print 2>/dev/null)
+          mapfile -t VMLINUX_FILES < <(find build_dir/target-* -path '*/linux-*/linux-*/vmlinux' -type f -print 2>/dev/null)
           if [[ "${#VMLINUX_FILES[@]}" -eq 0 ]]; then
             echo 'KERNEL BUILD ERROR: no kernel-build vmlinux found.' | tee -a "$DIAG"
             find build_dir/target-* -maxdepth 7 -name vmlinux -print 2>/dev/null | tee -a "$DIAG" || true
@@ -768,11 +767,9 @@ jobs:
         run: |
           mkdir -p source
           ccache -s | tee source/ccache-stats.log
-          echo "--- ccache log reason summary ---" | tee source/ccache-log-summary.log
+          echo "--- ccache uncacheable result counters ---" | tee source/ccache-log-summary.log
           if [[ -s source/ccache-debug.log ]]; then
-            grep -Ei 'uncacheable|unsupported|could not|failed|error|disabled' source/ccache-debug.log \
-              | sed -E 's/^[^:]+:[0-9]+: //' | sort | uniq -c | sort -nr | head -40 \
-              | tee -a source/ccache-log-summary.log || true
+            awk '/Result: / { reason=$NF; if (reason !~ /^(local_storage_|direct_cache_|preprocessed_cache_|cache_(hit|miss)$)/) count[reason]++ } END { for (reason in count) printf "%8d %s\n", count[reason], reason }' source/ccache-debug.log | sort -nr | tee -a source/ccache-log-summary.log
           else
             echo 'No ccache debug log entries were recorded.' | tee -a source/ccache-log-summary.log
           fi
@@ -852,8 +849,10 @@ jobs:
             echo
             echo '## ccache statistics'
             if [[ -f source/ccache-stats.log ]]; then cat source/ccache-stats.log; else echo 'ccache statistics unavailable'; fi
+            echo
+            echo '## ccache uncacheable result reasons'
+            if [[ -f source/ccache-log-summary.log ]]; then cat source/ccache-log-summary.log; else echo 'ccache reason summary unavailable'; fi
           } > artifacts/logs/build-summary.md
-
       - name: Verify and collect firmware artifacts
         if: always()
         shell: bash
@@ -862,7 +861,10 @@ jobs:
           mkdir -p artifacts/logs
           cp source/config-build-final.config artifacts/ 2>/dev/null || true
           cp source/feeds-update.log source/feeds-install.log source/defconfig.log source/download.log artifacts/logs/ 2>/dev/null || true
-          cp source/build*.log source/ccache-stats.log source/ccache-debug.log source/ccache-log-summary.log source/resource-plan.log source/resource-monitor.log artifacts/logs/ 2>/dev/null || true
+          cp source/build*.log source/ccache-stats.log source/ccache-log-summary.log source/resource-plan.log source/resource-monitor.log artifacts/logs/ 2>/dev/null || true
+          if [[ "${{ job.status }}" != "success" && -s source/ccache-debug.log ]]; then
+            gzip -1 -c source/ccache-debug.log > artifacts/logs/ccache-debug.log.gz
+          fi
           cp source/config-build-final.config artifacts/logs/ 2>/dev/null || true
           if [[ "${{ job.status }}" == "success" && -d source/bin/targets/mediatek/filogic ]]; then
             cp -a source/bin/targets/mediatek/filogic/. artifacts/
