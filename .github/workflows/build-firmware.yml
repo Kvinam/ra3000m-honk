@@ -48,13 +48,18 @@ jobs:
             apt-debs-v1-${{ runner.os }}-ubuntu24-
 
       - name: Install build dependencies (cached deb archives)
+        id: apt-install
         shell: bash
         run: |
           set -euo pipefail
           APT_CACHE=/home/runner/.cache/apt-archives
-          sudo mkdir -p "$APT_CACHE/partial"
-          sudo chmod -R a+rwx "$APT_CACHE"
-          sudo rm -f "$APT_CACHE/partial/"*
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$APT_CACHE" "$APT_CACHE/partial"
+          sudo chown -R "$RUNNER_UID:$RUNNER_GID" "$APT_CACHE"
+          sudo chmod -R u+rwX "$APT_CACHE"
+          sudo find "$APT_CACHE/partial" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          sudo rm -f "$APT_CACHE/lock"
           mapfile -t PACKAGES < config/build-deps.txt
           START=$SECONDS
           sudo apt-get update
@@ -82,6 +87,22 @@ jobs:
           restore-keys: |
             openwrt-dl-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-
             openwrt-dl-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}
+
+      - name: Prepare ccache restore directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE_PARENT=/home/runner/.cache
+          CCACHE_DIR="$CACHE_PARENT/ccache"
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+
+          # actions/cache extracts as the runner; make the extraction path
+          # traversable and writable before restoring the archive.
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$CACHE_PARENT"
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$CCACHE_DIR"
+          test -x "$CACHE_PARENT" && test -w "$CACHE_PARENT"
+          test -x "$CCACHE_DIR" && test -w "$CCACHE_DIR"
 
       - name: Restore ccache
         id: ccache-restore
@@ -156,12 +177,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: source/feeds
-          key: feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}
             feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
             feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-
 
       - name: Update and install feeds (timed)
+        id: feeds-update-install
         shell: bash
         run: |
           set -euo pipefail
@@ -172,6 +195,18 @@ jobs:
           START=$SECONDS
           ./scripts/feeds install -a 2>&1 | tee feeds-install.log
           echo "Feeds install elapsed: $((SECONDS-START)) seconds"
+
+          # Fingerprint exact checked-out commits for all feeds.
+          FEED_MANIFEST="$PWD/.cache-feed-revisions"
+          : > "$FEED_MANIFEST"
+          while IFS= read -r -d '' feed_dir; do
+            feed_name="$(basename "$feed_dir")"
+            feed_commit="$(git -C "$feed_dir" rev-parse HEAD)"
+            printf '%s %s\n' "$feed_name" "$feed_commit" >> "$FEED_MANIFEST"
+          done < <(find feeds -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+          test -s "$FEED_MANIFEST"
+          echo "Feed revision manifest:"
+          cat "$FEED_MANIFEST"
 
       - name: Configure and verify NAND target
         shell: bash
@@ -204,9 +239,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: source/staging_dir
-          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}-
+            staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
 
       - name: Normalize staging cache timestamps when present
         shell: bash
@@ -218,6 +253,27 @@ jobs:
           else
             echo "No staging cache restored; skipping timestamp normalization"
           fi
+
+      - name: Restore compatible host tools and toolchain build cache
+        id: tools-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            source/build_dir/host
+            source/build_dir/toolchain-*
+          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
+
+      - name: Report build cache footprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Tools cache hit: ${{ steps.tools-cache.outputs.cache-hit }}"
+          for path in source/build_dir/host source/build_dir/toolchain-* source/staging_dir; do
+            [[ -e "$path" ]] || continue
+            du -sh "$path" || true
+          done
       - name: Report cache restore results
         shell: bash
         run: |
@@ -269,9 +325,13 @@ jobs:
           echo "RAM total: ${RAM_MB}MB; memory-based jobs: ${RAM_JOBS}; selected jobs: ${THREADS}" | tee -a source/resource-plan.log
           free -h | tee -a source/resource-plan.log
           swapon --show | tee -a source/resource-plan.log || true
+          echo "--- filesystem capacity ---" | tee -a source/resource-plan.log
+          df -hT / "$PWD" | tee -a source/resource-plan.log
+          df -i / "$PWD" | tee -a source/resource-plan.log
           echo "COMPILE_THREADS=${THREADS}" >> "$GITHUB_ENV"
 
       - name: Compile firmware with resource monitoring and OOM-aware fallback
+        id: firmware-compile
         shell: bash
         env:
           CCACHE_DIR: /home/runner/.cache/ccache
@@ -328,8 +388,31 @@ jobs:
           echo "ccache status after build:"
           ccache -s
 
-      - name: Save APT archive cache (always)
+      - name: Normalize APT archive cache permissions
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APT_CACHE=/home/runner/.cache/apt-archives
+          if [[ ! -d "$APT_CACHE" ]]; then
+            echo "APT archive cache does not exist; skipping normalization"
+            exit 0
+          fi
+
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          # apt-get runs as root and may leave root-owned lock/partial files.
+          # Return ownership to the runner so actions/cache/save can read them.
+          sudo chown -R "$RUNNER_UID:$RUNNER_GID" "$APT_CACHE"
+          sudo chmod -R u+rwX "$APT_CACHE"
+          if [[ -d "$APT_CACHE/partial" ]]; then
+            find "$APT_CACHE/partial" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          fi
+          rm -f "$APT_CACHE/lock"
+          echo "PASS: APT archive cache is readable and writable by $(id -un)"
+
+      - name: Save APT archive cache
+        if: always() && steps.apt-install.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: /home/runner/.cache/apt-archives
@@ -340,12 +423,12 @@ jobs:
         with:
           path: source/dl
           key: openwrt-dl-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Save feeds repository cache (always)
-        if: always()
+      - name: Save feeds repository cache
+        if: always() && steps.feeds-update-install.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: source/feeds
-          key: feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Collect ccache statistics
         if: always()
@@ -366,7 +449,15 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: source/staging_dir
-          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save host tools and toolchain build cache
+        if: always() && steps.firmware-compile.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            source/build_dir/host
+            source/build_dir/toolchain-*
+          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
 
       - name: Verify and collect firmware artifacts
