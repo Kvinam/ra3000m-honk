@@ -61,10 +61,38 @@ jobs:
           sudo find "$APT_CACHE/partial" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           sudo rm -f "$APT_CACHE/lock"
           mapfile -t PACKAGES < config/build-deps.txt
+
+          # GitHub-hosted Ubuntu runners may inject a region-specific EC2 mirror
+          # through apt-mirrors.txt. #9 showed repeated Ign/timeouts on that host
+          # while archive.ubuntu.com was reachable; pin that entry to the working
+          # canonical HTTPS mirror before refreshing package indexes.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            echo "APT mirror list before normalization:"
+            cat /etc/apt/apt-mirrors.txt
+            sudo sed -i -E 's#https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu/?#https://archive.ubuntu.com/ubuntu/#g' /etc/apt/apt-mirrors.txt
+            echo "APT mirror list after normalization:"
+            cat /etc/apt/apt-mirrors.txt
+          fi
+
+          APT_NETWORK_OPTS=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=20
+            -o Acquire::https::Timeout=20
+            -o Acquire::http::Pipeline-Depth=0
+          )
+
+          echo "APT sources in use:"
+          grep -RhsE '^(URIs:|Suites:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+
           START=$SECONDS
-          sudo apt-get update
-          sudo apt-get -o Dir::Cache::archives="$APT_CACHE" install -y "${PACKAGES[@]}"
-          echo "APT dependency install elapsed: $((SECONDS-START)) seconds"
+          echo "Refreshing APT package indexes..."
+          sudo timeout --signal=TERM --kill-after=20s 300s apt-get "${APT_NETWORK_OPTS[@]}" update
+          echo "APT update elapsed: $((SECONDS-START)) seconds"
+
+          START=$SECONDS
+          echo "Installing build dependencies..."
+          sudo timeout --signal=TERM --kill-after=20s 300s apt-get "${APT_NETWORK_OPTS[@]}" -o Dir::Cache::archives="$APT_CACHE" install -y "${PACKAGES[@]}"
+          echo "APT install elapsed: $((SECONDS-START)) seconds"
 
       - name: Clone pinned source
         shell: bash
