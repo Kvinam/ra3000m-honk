@@ -93,6 +93,40 @@ jobs:
             ccache-v2-${{ runner.os }}-
             ccache-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
 
+      - name: Repair and verify ccache permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          CCACHE_DIR=/home/runner/.cache/ccache
+          CACHE_PARENT=/home/runner/.cache
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+
+          echo "Runner identity: $(id)"
+          echo "Permissions before repair:"
+          namei -l "$CCACHE_DIR" || true
+
+          # The restored Actions cache may contain entries owned by root or
+          # another UID. Repair only the dedicated ccache tree, not $HOME.
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$CACHE_PARENT"
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$CCACHE_DIR"
+          sudo chown -R "$RUNNER_UID:$RUNNER_GID" "$CCACHE_DIR"
+          sudo chmod -R u+rwX "$CCACHE_DIR"
+          chmod u+rwx "$CACHE_PARENT" "$CCACHE_DIR"
+
+          # Verify both traversal and an actual create/delete operation.
+          test -x "$CACHE_PARENT"
+          test -w "$CACHE_PARENT"
+          test -x "$CCACHE_DIR"
+          test -w "$CCACHE_DIR"
+          PROBE_FILE="$CCACHE_DIR/.permission-check-$$"
+          : > "$PROBE_FILE"
+          rm -f "$PROBE_FILE"
+
+          echo "Permissions after repair:"
+          namei -l "$CCACHE_DIR"
+          echo "PASS: ccache directory is writable by $(id -un) (uid=$RUNNER_UID)"
+
       - name: Verify NAND profile and DTS
         shell: bash
         run: |
