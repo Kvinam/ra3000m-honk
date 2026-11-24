@@ -320,10 +320,10 @@ jobs:
           grep -qx 'CONFIG_PACKAGE_honk=y' .config
           grep -qx 'CONFIG_PACKAGE_luci-app-honk=y' .config
           grep -qx 'CONFIG_PACKAGE_vmlinux-btf-builtin=y' .config
-          KERNEL_CONFIG=target/linux/mediatek/filogic/config-6.12
-          grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
-          grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
-          echo "PASS: kernel config fragment requests DEBUG_INFO and DEBUG_INFO_BTF in $KERNEL_CONFIG"
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO=y' .config || { echo 'CONFIGURATION ERROR: CONFIG_KERNEL_DEBUG_INFO is not enabled after make defconfig.' >&2; exit 1; }
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config || { echo 'CONFIGURATION ERROR: CONFIG_KERNEL_DEBUG_INFO_BTF is not enabled after make defconfig.' >&2; exit 1; }
+          grep -qx '# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set' .config || { echo 'CONFIGURATION ERROR: reduced debug info must be disabled for BTF.' >&2; exit 1; }
+          echo "PASS: OpenWrt Kconfig enables full debug info and BTF; reduced debug info is disabled."
           grep -qx 'CONFIG_DEVEL=y' .config
           grep -qx 'CONFIG_CCACHE=y' .config
           grep -qx 'CONFIG_CCACHE_DIR="/home/runner/.cache/ccache"' .config
@@ -496,44 +496,42 @@ jobs:
           set -euo pipefail
           cd source
           mkdir -p ../artifacts/logs
-          KERNEL_CONFIG_COUNT=0
-          while IFS= read -r KERNEL_CONFIG; do
-            echo "--- Generated kernel config: $KERNEL_CONFIG ---"
-            grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
-            grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
-            KERNEL_CONFIG_COUNT=$((KERNEL_CONFIG_COUNT + 1))
-          done < <(find build_dir/target-* -path '*/linux-*/.config' -type f -print 2>/dev/null)
-          if [[ "$KERNEL_CONFIG_COUNT" -eq 0 ]]; then
-            echo "ERROR: generated Linux kernel .config not found." >&2
+          DIAG=../artifacts/logs/btf-diagnostics.log
+          : > "$DIAG"
+          mapfile -t KERNEL_CONFIGS < <(find build_dir/target-* -path '*/linux-*/.config' -type f -print 2>/dev/null)
+          if [[ "${#KERNEL_CONFIGS[@]}" -eq 0 ]]; then
+            echo 'KERNEL BUILD ERROR: generated Linux kernel .config is missing; kernel build may have failed or stopped before configuration.' | tee -a "$DIAG"
+            find build_dir/target-* -maxdepth 6 -type f \( -name '.config' -o -name 'vmlinux' \) -print 2>/dev/null | tee -a "$DIAG" || true
             exit 1
           fi
-          echo "PASS: generated Linux kernel config enables DEBUG_INFO_BTF."
+          CONFIG_OK=0
+          for KERNEL_CONFIG in "${KERNEL_CONFIGS[@]}"; do
+            echo "--- Generated kernel config: $KERNEL_CONFIG ---" | tee -a "$DIAG"
+            grep -E '^(CONFIG_DEBUG_INFO|CONFIG_DEBUG_INFO_BTF|CONFIG_DEBUG_INFO_REDUCED)=' "$KERNEL_CONFIG" | tee -a "$DIAG" || true
+            if grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG" && grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"; then CONFIG_OK=1; fi
+          done
+          if [[ "$CONFIG_OK" -ne 1 ]]; then
+            echo 'KERNEL CONFIGURATION ERROR: generated kernel .config does not enable both CONFIG_DEBUG_INFO and CONFIG_DEBUG_INFO_BTF. Check OpenWrt Kconfig dependencies and kernel config merge.' | tee -a "$DIAG"
+            exit 1
+          fi
           mapfile -t VMLINUX_FILES < <(find build_dir/target-* -name vmlinux -type f -print 2>/dev/null)
           if [[ "${#VMLINUX_FILES[@]}" -eq 0 ]]; then
-            echo "ERROR: compiled kernel vmlinux not found; cannot verify BTF." >&2
-            find build_dir/target-* -maxdepth 5 -type f \( -name '.config' -o -name 'vmlinux' \) -print 2>/dev/null | tee ../artifacts/logs/btf-diagnostics.log || true
+            echo 'KERNEL BUILD ERROR: no compiled vmlinux found; compilation did not produce the expected kernel image.' | tee -a "$DIAG"
             exit 1
           fi
           BTF_FOUND=0
-          {
-            echo "Kernel config: $KERNEL_CONFIG"
-            grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF)=' "$KERNEL_CONFIG"
-          } | tee ../artifacts/logs/btf-diagnostics.log
-          while IFS= read -r VMLINUX; do
-            echo "--- $VMLINUX ---" | tee -a ../artifacts/logs/btf-diagnostics.log
+          for VMLINUX in "${VMLINUX_FILES[@]}"; do
+            echo "--- $VMLINUX ---" | tee -a "$DIAG"
             if readelf -SW "$VMLINUX" | grep -Eq '[[:space:]]\.BTF([[:space:]]|$)'; then
-              echo "PASS: BTF section found in $VMLINUX" | tee -a ../artifacts/logs/btf-diagnostics.log
-              BTF_FOUND=1
+              echo "PASS: .BTF section found in $VMLINUX" | tee -a "$DIAG"; BTF_FOUND=1
             else
-              echo "No .BTF section in $VMLINUX" | tee -a ../artifacts/logs/btf-diagnostics.log
+              echo "ARTIFACT CHECK FAILED: .BTF section absent from $VMLINUX" | tee -a "$DIAG"
             fi
-          done < <(find build_dir/target-* -name vmlinux -type f -print 2>/dev/null)
+          done
           if [[ "$BTF_FOUND" -ne 1 ]]; then
-            echo "ERROR: no compiled vmlinux contains a .BTF section." >&2
-            exit 1
+            echo 'ARTIFACT CHECK ERROR: vmlinux exists but no image contains a .BTF section.' | tee -a "$DIAG"; exit 1
           fi
-          echo "PASS: compiled kernel contains BTF type information."
-
+          echo 'PASS: compiled kernel contains BTF type information.' | tee -a "$DIAG"
       - name: Report target build directory footprint
         if: always()
         shell: bash

@@ -75,10 +75,10 @@ jobs:
           cd source
           cp config/diffconfig .config
           make defconfig 2>&1 | tee defconfig.log
-          KERNEL_CONFIG=target/linux/mediatek/filogic/config-6.12
-          grep -qx 'CONFIG_DEBUG_INFO=y' "$KERNEL_CONFIG"
-          grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
-          echo "PASS: kernel config fragment requests DEBUG_INFO and DEBUG_INFO_BTF"
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO=y' .config || { echo 'FAIL: CONFIG_KERNEL_DEBUG_INFO not enabled after defconfig'; exit 1; }
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config || { echo 'FAIL: CONFIG_KERNEL_DEBUG_INFO_BTF not enabled after defconfig'; exit 1; }
+          grep -qx '# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set' .config || { echo 'FAIL: CONFIG_KERNEL_DEBUG_INFO_REDUCED must be disabled for BTF'; exit 1; }
+          echo 'PASS: OpenWrt Kconfig enables full debug info and BTF, with reduced debug info disabled.'
           required=(
             CONFIG_TARGET_mediatek
             CONFIG_TARGET_mediatek_filogic
@@ -104,7 +104,7 @@ jobs:
             fi
           done
           echo '--- BPF/BTF kernel fragment checks ---'
-          for symbol in CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_NET_CLS_BPF CONFIG_NET_ACT_BPF CONFIG_NET_CLS_ACT CONFIG_NET_SCH_INGRESS CONFIG_VETH CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF; do
+          for symbol in CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_NET_CLS_BPF CONFIG_NET_ACT_BPF CONFIG_NET_CLS_ACT CONFIG_NET_SCH_INGRESS CONFIG_VETH; do
             if grep -qx "${symbol}=y" config/kernel-bpf.fragment || grep -qx "${symbol}=m" config/kernel-bpf.fragment; then
               echo "PASS: ${symbol} requested"
             else
@@ -137,7 +137,7 @@ jobs:
             echo 'Validation failed.'
             exit 1
           fi
-          echo 'PASS: exact NAND profile, Honk package and BPF/BTF fragment checks.'
+          echo 'PASS: exact NAND profile, Honk packages, BPF fragment and OpenWrt BTF Kconfig checks.'
           echo 'No firmware compilation or publishing is performed.'
 
       - name: Upload config and feed diagnostics
