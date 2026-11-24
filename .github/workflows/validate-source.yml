@@ -17,19 +17,25 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-nand-profile.ps1
 
-      - name: Clone pinned source and audit NAND profile
+      - name: Restore OpenWrt Git object cache
+        id: openwrt-git-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            git-openwrt-v1-${{ runner.os }}-
+
+      - name: Checkout pinned source and audit NAND profile
         shell: bash
         run: |
           set -euo pipefail
-          SOURCE_REPO=https://github.com/shiyu1314/openwrt-source
-          SOURCE_REF=v25.12.6
-          EXPECTED_COMMIT=dc327b29f23cbee6c4dc41fef63656db0f7dba38
-          git clone --filter=blob:none --no-checkout "$SOURCE_REPO" source
-          git -C source fetch --depth=1 origin "$SOURCE_REF"
-          git -C source checkout --detach FETCH_HEAD
-          ACTUAL_COMMIT=$(git -C source rev-parse HEAD)
-          echo "Checked source commit: $ACTUAL_COMMIT"
-          test "$ACTUAL_COMMIT" = "$EXPECTED_COMMIT"
+          bash scripts/checkout-pinned-source.sh \
+            https://github.com/shiyu1314/openwrt-source v25.12.6 \
+            dc327b29f23cbee6c4dc41fef63656db0f7dba38 \
+            /home/runner/.cache/git/openwrt-source.git source
+          echo "Checked source commit: $(git -C source rev-parse HEAD)"
+          cd source
           DTS=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dts
           OVERLAY=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand.dtso
           RECIPE=target/linux/mediatek/image/filogic.mk
@@ -63,3 +69,10 @@ jobs:
           grep -Fq 'KERNEL_PATCHVER:=6.12' "$TARGET"
           echo 'NAND RAX3000M DTS/partition/UBI/image/kernel checks passed.'
           echo 'Audit only: no firmware build, upload, or flashing.'
+
+      - name: Save OpenWrt Git object cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}

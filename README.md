@@ -18,7 +18,7 @@
 ## Verified source baseline (initial pin)
 
 - Config overlay: https://github.com/shiyu1314/openwrt-rax3000m, branch 25.12, commit 3e9480c061bcc92f6fa260920b189c22a6f04a9b
-- Source tree: https://github.com/shiyu1314/openwrt-source, tag/ref v25.12.6, commit 8a3b1e99b158d88104dc8aecf1c98721ef87f3a3
+- Source tree: https://github.com/shiyu1314/openwrt-source, tag/ref v25.12.6, commit dc327b29f23cbee6c4dc41fef63656db0f7dba38
 - Source branch/tag refs were checked with git ls-remote; files were inspected via GitHub API.
 
 ### Verified NAND device profile
@@ -61,21 +61,19 @@
 
 ## Build notes
 
-构建命令与源码地址将在验证后写入，不在此阶段猜测或硬编码。
-
-
+构建由 `.github/workflows/build-firmware.yml` 执行。缓存架构、版本校验和回退策略见 [`docs/build-cache-optimization.md`](docs/build-cache-optimization.md)。
 
 ## Honk Full / BPF integration (configuration stage)
 
 - Honk OpenWrt feed pinned to `daeuniverse/openwrt-packages` commit `e104a4930c5fc4f625f3355257626495685424f5`
 - Selected: `honk`, `luci-app-honk`, `vmlinux-btf-builtin`, and TC/eBPF kernel modules
 - Honk package build features: upstream defaults + `ebpf` + `native-ui`; native UI embeds Doona and implies Native API. The package source Makefile is pinned by feed commit, not copied into this repository.
-- Kernel fragment: `config/kernel-bpf.fragment` enables BPF syscall/JIT, TC classifier/action, ingress, veth, and BTF.
+- Kernel fragment: `config/kernel-bpf.fragment` enables BPF syscall/JIT, TC classifier/action, ingress, and veth. OpenWrt Kconfig enables full DWARF and BTF through `config/diffconfig` (`CONFIG_KERNEL_DEBUG_INFO=y`, `CONFIG_KERNEL_DEBUG_INFO_BTF=y`, reduced debug info disabled).
 - Preparation script: `scripts/prepare-honk-build.sh` adds the pinned feed, applies the kernel config fragment idempotently, and installs Honk package definitions.
 
 ### Important BTF check
 
-The router's running kernel was read-only checked: `/sys/kernel/btf/vmlinux` exists on kernel `6.6.95`. This proves the current running kernel has BTF, not that a future 6.12 build will. The build config explicitly enables `CONFIG_DEBUG_INFO_BTF=y`; after the first boot, re-check `/sys/kernel/btf/vmlinux` before enabling Honk.
+The router's running kernel was read-only checked: `/sys/kernel/btf/vmlinux` exists on kernel `6.6.95`. This proves the current running kernel has BTF, not that a future 6.12 build will. The build config enables BTF through OpenWrt Kconfig (`CONFIG_KERNEL_DEBUG_INFO_BTF=y`); the workflow verifies the generated Linux kernel `.config` and compiled `vmlinux` `.BTF` section. After the first boot, re-check `/sys/kernel/btf/vmlinux` before enabling Honk.
 
 The new workflow `validate-honk-config.yml` performs feed preparation and `make defconfig` package-selection checks only. It does **not** build firmware or flash.
 

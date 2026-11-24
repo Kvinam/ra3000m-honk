@@ -10,6 +10,9 @@ on:
       - 'config/kernel-bpf.fragment'
       - 'scripts/prepare-honk-build.sh'
       - 'config/build-deps.txt'
+      - 'scripts/checkout-pinned-source.sh'
+      - 'scripts/checkout-pinned-commit.sh'
+      - 'scripts/update-feeds-cache.sh'
 
 permissions:
   contents: read
@@ -20,6 +23,7 @@ concurrency:
 
 env:
   SOURCE_COMMIT: dc327b29f23cbee6c4dc41fef63656db0f7dba38
+  SOURCE_REF: v25.12.6
   OVERLAY_COMMIT: 3e9480c061bcc92f6fa260920b189c22a6f04a9b
   HONK_COMMIT: e104a4930c5fc4f625f3355257626495685424f5
   HONK_SOURCE_COMMIT: 64848881b7304e250e7a25422f4f1d86a5975eca
@@ -48,19 +52,29 @@ jobs:
             apt-debs-v1-${{ runner.os }}-ubuntu24-${{ hashFiles('config/build-deps.txt') }}-
             apt-debs-v1-${{ runner.os }}-ubuntu24-
 
-      - name: Install build dependencies (cached deb archives)
+      - name: Restore APT package index cache
+        id: apt-index-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/apt-lists
+          key: apt-index-v1-${{ runner.os }}-ubuntu24-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            apt-index-v1-${{ runner.os }}-ubuntu24-
+
+      - name: Install build dependencies (cached deb archives and package indexes)
         id: apt-install
         shell: bash
         run: |
           set -euo pipefail
           APT_CACHE=/home/runner/.cache/apt-archives
+          APT_LIST_CACHE=/home/runner/.cache/apt-lists
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$APT_CACHE" "$APT_CACHE/partial"
+          sudo install -d -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0755 "$APT_CACHE" "$APT_CACHE/partial" "$APT_LIST_CACHE" "$APT_LIST_CACHE/partial"
           sudo chown -R "$RUNNER_UID:$RUNNER_GID" "$APT_CACHE"
           sudo chmod -R u+rwX "$APT_CACHE"
           sudo find "$APT_CACHE/partial" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-          sudo rm -f "$APT_CACHE/lock"
+          sudo rm -f "$APT_CACHE/lock" "$APT_LIST_CACHE/lock"
           mapfile -t PACKAGES < config/build-deps.txt
 
           # GitHub-hosted Ubuntu runners may inject a region-specific EC2 mirror
@@ -85,37 +99,59 @@ jobs:
           echo "APT sources in use:"
           grep -RhsE '^(URIs:|Suites:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
 
+          apt_retry() {
+            local attempt=1
+            while (( attempt <= 3 )); do
+              if sudo timeout --signal=TERM --kill-after=20s 300s apt-get "${APT_NETWORK_OPTS[@]}" "$@"; then return 0; fi
+              echo "APT attempt ${attempt}/3 failed; retrying after backoff"
+              sleep $((attempt * 8))
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
           START=$SECONDS
           echo "Refreshing APT package indexes..."
-          sudo timeout --signal=TERM --kill-after=20s 300s apt-get "${APT_NETWORK_OPTS[@]}" update
+          apt_retry -o Dir::State::lists="$APT_LIST_CACHE" update
           echo "APT update elapsed: $((SECONDS-START)) seconds"
 
           START=$SECONDS
           echo "Installing build dependencies..."
-          sudo timeout --signal=TERM --kill-after=20s 300s apt-get "${APT_NETWORK_OPTS[@]}" -o Dir::Cache::archives="$APT_CACHE" install -y "${PACKAGES[@]}"
+          apt_retry -o Dir::State::lists="$APT_LIST_CACHE" -o Dir::Cache::archives="$APT_CACHE" install -y "${PACKAGES[@]}"
           echo "APT install elapsed: $((SECONDS-START)) seconds"
+          mkdir -p artifacts/logs
+          dpkg-query -W -f='${binary:Package}=${Version}\n' "${PACKAGES[@]}" 2>/dev/null | sort > artifacts/logs/apt-package-versions.txt
 
-      - name: Clone pinned source
+      - name: Restore OpenWrt Git object cache
+        id: openwrt-git-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            git-openwrt-v1-${{ runner.os }}-
+
+      - name: Checkout pinned OpenWrt source using Git object cache
         shell: bash
         run: |
           set -euo pipefail
           START=$SECONDS
-          git clone --filter=blob:none --no-checkout https://github.com/shiyu1314/openwrt-source source
-          git -C source fetch --depth=1 origin v25.12.6
-          git -C source checkout --detach FETCH_HEAD
-          test "$(git -C source rev-parse HEAD)" = "${SOURCE_COMMIT}"
-          echo "Verified source pin: ${SOURCE_COMMIT}"
-          echo "Source clone/fetch elapsed: $((SECONDS-START)) seconds"
+          bash scripts/checkout-pinned-source.sh \
+            https://github.com/shiyu1314/openwrt-source \
+            "$SOURCE_REF" "$SOURCE_COMMIT" \
+            /home/runner/.cache/git/openwrt-source.git source
+          echo "OpenWrt source checkout elapsed: $((SECONDS-START)) seconds"
 
       - name: Restore OpenWrt source archives (dl)
         id: dl-cache-restore
         uses: actions/cache/restore@v4
         with:
           path: source/dl
-          key: openwrt-dl-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: openwrt-dl-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            openwrt-dl-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-
-            openwrt-dl-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}
+            openwrt-dl-v3-${{ runner.os }}-
+            openwrt-dl-v2-${{ runner.os }}-
+            openwrt-dl-v1-${{ runner.os }}-
 
       - name: Prepare ccache restore directory
         shell: bash
@@ -195,6 +231,7 @@ jobs:
         run: |
           set -euo pipefail
           cp scripts/prepare-honk-build.sh source/scripts/
+          cp scripts/update-feeds-cache.sh source/scripts/
           cp config/kernel-bpf.fragment source/config/
           cp config/diffconfig source/config/
           chmod +x source/scripts/prepare-honk-build.sh
@@ -206,56 +243,53 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: source/feeds
-          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}
-            feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-
-            feeds-v1-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-
+            feeds-v3-${{ runner.os }}-
+            feeds-v2-${{ runner.os }}-
+            feeds-v1-${{ runner.os }}-
 
-      - name: Update and install feeds (timed)
+      - name: Update only changed feeds and install feed packages
         id: feeds-update-install
         shell: bash
         run: |
           set -euo pipefail
           cd source
           START=$SECONDS
-          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
-          echo "Feeds update elapsed: $((SECONDS-START)) seconds"
-          START=$SECONDS
-          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
-          echo "Feeds install elapsed: $((SECONDS-START)) seconds"
+          bash scripts/update-feeds-cache.sh
+          echo "Selective feed update/install elapsed: $((SECONDS-START)) seconds"
 
-          # Fingerprint exact checked-out commits for all feeds.
-          FEED_MANIFEST="$PWD/.cache-feed-revisions"
-          : > "$FEED_MANIFEST"
-          while IFS= read -r -d '' feed_dir; do
-            feed_name="$(basename "$feed_dir")"
-            feed_commit="$(git -C "$feed_dir" rev-parse HEAD)"
-            printf '%s %s\n' "$feed_name" "$feed_commit" >> "$FEED_MANIFEST"
-          done < <(find feeds -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
-          test -s "$FEED_MANIFEST"
-          echo "Feed revision manifest:"
-          cat "$FEED_MANIFEST"
+      - name: Restore Honk Git object cache
+        id: honk-git-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/git/honk.git
+          key: git-honk-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            git-honk-v1-${{ runner.os }}-
 
-      - name: Prepare pinned Honk source tree
+      - name: Checkout pinned Honk source using Git object cache
         shell: bash
         run: |
           set -euo pipefail
           HONK_SRC="source/feeds/daeuniverse/honk/src"
           mkdir -p "$(dirname "$HONK_SRC")"
-          if [[ ! -d "$HONK_SRC/.git" ]]; then
-            rm -rf "$HONK_SRC"
-            git clone --filter=blob:none --no-checkout https://github.com/daeuniverse/honk "$HONK_SRC"
-          fi
-          git -C "$HONK_SRC" fetch --depth 1 origin "$HONK_SOURCE_COMMIT"
-          git -C "$HONK_SRC" checkout --detach "$HONK_SOURCE_COMMIT"
-          ACTUAL="$(git -C "$HONK_SRC" rev-parse HEAD)"
-          test "$ACTUAL" = "$HONK_SOURCE_COMMIT"
-          echo "PASS: Honk source pinned at $ACTUAL"
+          bash scripts/checkout-pinned-commit.sh \
+            https://github.com/daeuniverse/honk "$HONK_SOURCE_COMMIT" \
+            /home/runner/.cache/git/honk.git "$HONK_SRC"
 
       # Honk pins both the application and eBPF Rust toolchains. The stable
       # toolchain must include the OpenWrt target's core/std libraries; the
       # nested nightly toolchain builds the BPF object from rust-src.
+      - name: Restore pinned Rust toolchains
+        id: rustup-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.rustup/toolchains
+          key: rustup-toolchains-v1-${{ runner.os }}-stable-1.99.1-nightly-2026-10-20-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            rustup-toolchains-v1-${{ runner.os }}-stable-1.99.1-nightly-2026-10-20-aarch64-
+
       - name: Install pinned Honk Rust toolchains
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
@@ -279,6 +313,15 @@ jobs:
           restore-keys: |
             honk-cargo-v1-${{ runner.os }}-${{ hashFiles('source/feeds/daeuniverse/honk/Cargo.lock', 'source/feeds/daeuniverse/honk/crates/honk-ebpf/Cargo.lock') }}-
 
+      - name: Restore pinned bpf-linker archive
+        id: bpf-linker-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/bpf-linker
+          key: bpf-linker-v1-${{ runner.os }}-0.11.0-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bpf-linker-v1-${{ runner.os }}-0.11.0-
+
       - name: Install pinned bpf-linker
         shell: bash
         run: |
@@ -286,9 +329,17 @@ jobs:
           BPF_LINKER_VERSION=0.11.0
           BPF_LINKER_SHA256=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
           export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-          ARCHIVE="$RUNNER_TEMP/bpf-linker.tar.zst"
-          curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          CACHE_DIR=/home/runner/.cache/bpf-linker
+          ARCHIVE="$CACHE_DIR/bpf-linker-${BPF_LINKER_VERSION}.tar.zst"
+          mkdir -p "$CACHE_DIR"
+          if [[ -s "$ARCHIVE" ]] && ! echo "$BPF_LINKER_SHA256  $ARCHIVE" | sha256sum -c --status; then
+            echo "Cached bpf-linker archive checksum mismatch; discarding it"
+            rm -f "$ARCHIVE"
+          fi
+          if [[ ! -s "$ARCHIVE" ]]; then
+            curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" \
+              "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          fi
           echo "$BPF_LINKER_SHA256  $ARCHIVE" | sha256sum -c -
           mkdir -p "$CARGO_HOME/bin"
           zstd -dc "$ARCHIVE" | tar -xf - -C "$CARGO_HOME/bin"
@@ -335,22 +386,43 @@ jobs:
           done
           cp .config config-build-final.config
 
+      - name: Write build-cache compatibility fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUTS_SHA="$(sha256sum config/build-deps.txt config/diffconfig config/kernel-bpf.fragment scripts/prepare-honk-build.sh scripts/update-feeds-cache.sh artifacts/logs/apt-package-versions.txt source/.config source/.cache-feed-revisions | sha256sum | awk '{print $1}')"
+          {
+            echo "SOURCE_COMMIT=${SOURCE_COMMIT}"
+            echo "OVERLAY_COMMIT=${OVERLAY_COMMIT}"
+            echo "HONK_COMMIT=${HONK_COMMIT}"
+            echo "HONK_SOURCE_COMMIT=${HONK_SOURCE_COMMIT}"
+            echo "INPUTS_SHA256=${INPUTS_SHA}"
+          } > source/.cache-build-fingerprint.expected
+
       - name: Cache compatible staging directory
         id: staging-cache
         uses: actions/cache/restore@v4
         with:
-          path: source/staging_dir
-          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            source/staging_dir
+            source/.cache-staging-fingerprint
+          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
+            staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
 
       - name: Normalize staging cache timestamps when present
         shell: bash
         run: |
           set -euo pipefail
           if [[ -d source/staging_dir ]]; then
-            find source/staging_dir -type f -exec touch {} +
-            echo "Staging directory present; timestamps normalized"
+            if [[ ! -f source/.cache-staging-fingerprint ]] || ! cmp -s source/.cache-build-fingerprint.expected source/.cache-staging-fingerprint; then
+              echo "Staging cache fingerprint mismatch; discarding restored staging directory"
+              rm -rf source/staging_dir
+              rm -f source/.cache-staging-fingerprint
+            else
+              find source/staging_dir -type f -exec touch {} +
+              echo "Staging cache fingerprint verified; timestamps normalized"
+            fi
           else
             echo "No staging cache restored; skipping timestamp normalization"
           fi
@@ -362,15 +434,40 @@ jobs:
           path: |
             source/build_dir/host
             source/build_dir/toolchain-*
-          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+            source/.cache-tools-fingerprint
+          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
+            tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-
+
+      - name: Validate host tools and toolchain cache fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d source/build_dir/host ]] || compgen -G 'source/build_dir/toolchain-*' >/dev/null; then
+            if [[ ! -f source/.cache-tools-fingerprint ]] || ! cmp -s source/.cache-build-fingerprint.expected source/.cache-tools-fingerprint; then
+              echo "Host tools/toolchain cache fingerprint mismatch; discarding restored directories"
+              rm -rf source/build_dir/host source/build_dir/toolchain-*
+              rm -f source/.cache-tools-fingerprint
+            else
+              echo "Host tools/toolchain cache fingerprint verified"
+            fi
+          else
+            echo "No host tools/toolchain cache restored"
+          fi
+
+      - name: Materialize verified cache fingerprints
+        id: cache-fingerprint-ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp source/.cache-build-fingerprint.expected source/.cache-staging-fingerprint
+          cp source/.cache-build-fingerprint.expected source/.cache-tools-fingerprint
 
       - name: Report build cache footprint
         shell: bash
         run: |
           set -euo pipefail
-          echo "Tools cache hit: ${{ steps.tools-cache.outputs.cache-hit }}"
+          echo "Tools cache matched key: ${{ steps.tools-cache.outputs.cache-matched-key }}"
           for path in source/build_dir/host source/build_dir/toolchain-* source/staging_dir; do
             [[ -e "$path" ]] || continue
             du -sh "$path" || true
@@ -378,24 +475,42 @@ jobs:
       - name: Report cache restore results
         shell: bash
         run: |
-          echo "APT archive cache hit: ${{ steps.apt-cache-restore.outputs.cache-hit }}"
-          echo "OpenWrt dl cache hit: ${{ steps.dl-cache-restore.outputs.cache-hit }}"
-          echo "ccache hit: ${{ steps.ccache-restore.outputs.cache-hit }}"
-          echo "Feeds cache hit: ${{ steps.feeds-cache-restore.outputs.cache-hit }}"
-          echo "Staging cache hit: ${{ steps.staging-cache.outputs.cache-hit }}"
+          report_cache() {
+            local name="$1" exact="$2" key="$3"
+            if [[ "$exact" == true ]]; then echo "$name: exact hit ($key)"
+            elif [[ -n "$key" ]]; then echo "$name: fallback restored ($key)"
+            else echo "$name: miss"; fi
+          }
+          report_cache APT-archives "${{ steps.apt-cache-restore.outputs.cache-hit }}" "${{ steps.apt-cache-restore.outputs.cache-matched-key }}"
+          report_cache APT-indexes "${{ steps.apt-index-cache.outputs.cache-hit }}" "${{ steps.apt-index-cache.outputs.cache-matched-key }}"
+          report_cache OpenWrt-dl "${{ steps.dl-cache-restore.outputs.cache-hit }}" "${{ steps.dl-cache-restore.outputs.cache-matched-key }}"
+          report_cache ccache "${{ steps.ccache-restore.outputs.cache-hit }}" "${{ steps.ccache-restore.outputs.cache-matched-key }}"
+          report_cache Feeds "${{ steps.feeds-cache-restore.outputs.cache-hit }}" "${{ steps.feeds-cache-restore.outputs.cache-matched-key }}"
+          report_cache Cargo "${{ steps.honk-cargo-cache.outputs.cache-hit }}" "${{ steps.honk-cargo-cache.outputs.cache-matched-key }}"
+          report_cache Staging "${{ steps.staging-cache.outputs.cache-hit }}" "${{ steps.staging-cache.outputs.cache-matched-key }}"
+          report_cache OpenWrt-Git "${{ steps.openwrt-git-cache.outputs.cache-hit }}" "${{ steps.openwrt-git-cache.outputs.cache-matched-key }}"
+          report_cache Honk-Git "${{ steps.honk-git-cache.outputs.cache-hit }}" "${{ steps.honk-git-cache.outputs.cache-matched-key }}"
+          report_cache Rust "${{ steps.rustup-cache-restore.outputs.cache-hit }}" "${{ steps.rustup-cache-restore.outputs.cache-matched-key }}"
+          report_cache bpf-linker "${{ steps.bpf-linker-cache.outputs.cache-hit }}" "${{ steps.bpf-linker-cache.outputs.cache-matched-key }}"
+          report_cache Host-tools "${{ steps.tools-cache.outputs.cache-hit }}" "${{ steps.tools-cache.outputs.cache-matched-key }}"
       - name: Download source archives with retry
         shell: bash
         run: |
           set -euo pipefail
           cd source
+          mkdir -p dl
+          echo "dl cache files before download: $(find dl -type f | wc -l)" | tee download.log
+          du -sh dl 2>/dev/null | tee -a download.log || true
           START=$SECONDS
-          if make download -j8 2>&1 | tee download.log; then
+          if make download -j8 2>&1 | tee -a download.log; then
             echo "Download attempt 1 succeeded"
           else
             echo "Download attempt 1 failed; retrying with -j4"
             make download -j4 2>&1 | tee -a download.log
           fi
-          echo "Source download elapsed: $((SECONDS-START)) seconds"
+          echo "Source download elapsed: $((SECONDS-START)) seconds" | tee -a download.log
+          echo "dl cache files after download: $(find dl -type f | wc -l)" | tee -a download.log
+          du -sh dl 2>/dev/null | tee -a download.log || true
 
       - name: Configure swap and calculate compile parallelism
         shell: bash
@@ -436,11 +551,14 @@ jobs:
         shell: bash
         env:
           CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_LOGFILE: ${{ github.workspace }}/source/ccache-debug.log
         run: |
           set -uo pipefail
           cd source
           mkdir -p "$CCACHE_DIR"
           ccache -M 5G
+          echo "ccache configuration:"
+          ccache -p
           ccache -z
           echo "ccache status before build:"
           ccache -s
@@ -487,8 +605,11 @@ jobs:
           echo "Compile elapsed: $((SECONDS-START)) seconds" | tee -a resource-plan.log
           kill "$MONITOR_PID" 2>/dev/null || true
           wait "$MONITOR_PID" 2>/dev/null || true
-          echo "ccache status after build:"
-          ccache -s
+          echo "ccache status after build (verbose reason counters):"
+          ccache -s -v | tee ccache-stats.log
+          ccache -s -v | grep -Ei 'uncacheable|error|autoconf|called for|unsupported|preprocess|compiler|output|disabled|multiple source|bad argument' > ccache-log-summary.log || true
+          echo "ccache directory footprint:"
+          du -sh "$CCACHE_DIR" || true
 
       - name: Verify compiled kernel BTF data
         shell: bash
@@ -514,18 +635,25 @@ jobs:
             echo 'KERNEL CONFIGURATION ERROR: generated kernel .config does not enable both CONFIG_DEBUG_INFO and CONFIG_DEBUG_INFO_BTF. Check OpenWrt Kconfig dependencies and kernel config merge.' | tee -a "$DIAG"
             exit 1
           fi
-          mapfile -t VMLINUX_FILES < <(find build_dir/target-* -name vmlinux -type f -print 2>/dev/null)
+          # Inspect only the actual kernel build ELF, not target-level marker files.
+          mapfile -t VMLINUX_FILES < <(find build_dir/target-* -path '*/linux-*/vmlinux' -type f -print 2>/dev/null)
           if [[ "${#VMLINUX_FILES[@]}" -eq 0 ]]; then
-            echo 'KERNEL BUILD ERROR: no compiled vmlinux found; compilation did not produce the expected kernel image.' | tee -a "$DIAG"
+            echo 'KERNEL BUILD ERROR: no kernel-build vmlinux found.' | tee -a "$DIAG"
+            find build_dir/target-* -maxdepth 7 -name vmlinux -print 2>/dev/null | tee -a "$DIAG" || true
             exit 1
           fi
           BTF_FOUND=0
           for VMLINUX in "${VMLINUX_FILES[@]}"; do
             echo "--- $VMLINUX ---" | tee -a "$DIAG"
+            if ! readelf -h "$VMLINUX" >/dev/null 2>&1; then
+              echo "KERNEL ARTIFACT ERROR: $VMLINUX is not ELF." | tee -a "$DIAG"
+              continue
+            fi
             if readelf -SW "$VMLINUX" | grep -Eq '[[:space:]]\.BTF([[:space:]]|$)'; then
-              echo "PASS: .BTF section found in $VMLINUX" | tee -a "$DIAG"; BTF_FOUND=1
+              echo "PASS: .BTF section found in $VMLINUX" | tee -a "$DIAG"
+              BTF_FOUND=1
             else
-              echo "ARTIFACT CHECK FAILED: .BTF section absent from $VMLINUX" | tee -a "$DIAG"
+              echo "BTF MISSING: no .BTF section in $VMLINUX" | tee -a "$DIAG"
             fi
           done
           if [[ "$BTF_FOUND" -ne 1 ]]; then
@@ -568,6 +696,50 @@ jobs:
           rm -f "$APT_CACHE/lock"
           echo "PASS: APT archive cache is readable and writable by $(id -un)"
 
+      - name: Normalize APT package index cache permissions
+        if: always() && steps.apt-install.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIST_CACHE=/home/runner/.cache/apt-lists
+          if [[ -d "$LIST_CACHE" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$LIST_CACHE"
+            sudo chmod -R u+rwX "$LIST_CACHE"
+            rm -f "$LIST_CACHE/lock"
+            if [[ -d "$LIST_CACHE/partial" ]]; then find "$LIST_CACHE/partial" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi
+          fi
+      - name: Save APT package index cache
+        if: always() && steps.apt-install.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/apt-lists
+          key: apt-index-v1-${{ runner.os }}-ubuntu24-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save OpenWrt Git object cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save Honk Git object cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/git/honk.git
+          key: git-honk-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save pinned bpf-linker archive
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/bpf-linker
+          key: bpf-linker-v1-${{ runner.os }}-0.11.0-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save pinned Rust toolchains
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.rustup/toolchains
+          key: rustup-toolchains-v1-${{ runner.os }}-stable-1.99.1-nightly-2026-10-20-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Save APT archive cache
         if: always() && steps.apt-install.outcome == 'success'
         uses: actions/cache/save@v4
@@ -579,22 +751,31 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: source/dl
-          key: openwrt-dl-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: openwrt-dl-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save feeds repository cache
         if: always() && steps.feeds-update-install.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: source/feeds
-          key: feeds-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('source/feeds.conf.default') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: feeds-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Collect ccache statistics
         if: always()
         shell: bash
         env:
           CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_LOGFILE: ${{ github.workspace }}/source/ccache-debug.log
         run: |
           mkdir -p source
           ccache -s | tee source/ccache-stats.log
+          echo "--- ccache log reason summary ---" | tee source/ccache-log-summary.log
+          if [[ -s source/ccache-debug.log ]]; then
+            grep -Ei 'uncacheable|unsupported|could not|failed|error|disabled' source/ccache-debug.log \
+              | sed -E 's/^[^:]+:[0-9]+: //' | sort | uniq -c | sort -nr | head -40 \
+              | tee -a source/ccache-log-summary.log || true
+          else
+            echo 'No ccache debug log entries were recorded.' | tee -a source/ccache-log-summary.log
+          fi
       - name: Save ccache (even after build failure)
         if: always()
         uses: actions/cache/save@v4
@@ -609,21 +790,69 @@ jobs:
             /home/runner/.cargo/registry
             /home/runner/.cargo/git
           key: honk-cargo-v1-${{ runner.os }}-${{ hashFiles('source/feeds/daeuniverse/honk/Cargo.lock', 'source/feeds/daeuniverse/honk/crates/honk-ebpf/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Save compatible staging cache
         if: success()
         uses: actions/cache/save@v4
         with:
-          path: source/staging_dir
-          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            source/staging_dir
+            source/.cache-staging-fingerprint
+          key: staging-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save host tools and toolchain build cache
-        if: always()
+        if: always() && steps.cache-fingerprint-ready.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: |
             source/build_dir/host
             source/build_dir/toolchain-*
-          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ hashFiles('config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
+            source/.cache-tools-fingerprint
+          key: tools-v2-${{ runner.os }}-${{ env.SOURCE_COMMIT }}-${{ env.OVERLAY_COMMIT }}-${{ env.HONK_COMMIT }}-${{ env.HONK_SOURCE_COMMIT }}-${{ hashFiles('config/build-deps.txt', 'config/diffconfig', 'config/kernel-bpf.fragment', 'scripts/prepare-honk-build.sh', 'scripts/update-feeds-cache.sh', 'artifacts/logs/apt-package-versions.txt', 'source/.config', 'source/feeds.conf.default', 'source/.cache-feed-revisions') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+
+      - name: Generate build and cache diagnostics summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/logs
+          {
+            echo "# RAX3000M Honk build summary"
+            echo
+            echo "- Workflow run: ${GITHUB_RUN_ID:-unknown}"
+            echo "- Source pin: ${SOURCE_COMMIT} (${SOURCE_REF})"
+            echo "- Honk feed pin: ${HONK_COMMIT}"
+            echo "- Honk source pin: ${HONK_SOURCE_COMMIT}"
+            report_cache() {
+              local name="$1" exact="$2" key="$3"
+              if [[ "$exact" == true ]]; then echo "- $name: exact hit ($key)"
+              elif [[ -n "$key" ]]; then echo "- $name: fallback restored ($key)"
+              else echo "- $name: miss"; fi
+            }
+            report_cache APT-archives "${{ steps.apt-cache-restore.outputs.cache-hit }}" "${{ steps.apt-cache-restore.outputs.cache-matched-key }}"
+            report_cache APT-indexes "${{ steps.apt-index-cache.outputs.cache-hit }}" "${{ steps.apt-index-cache.outputs.cache-matched-key }}"
+            report_cache OpenWrt-Git "${{ steps.openwrt-git-cache.outputs.cache-hit }}" "${{ steps.openwrt-git-cache.outputs.cache-matched-key }}"
+            report_cache OpenWrt-dl "${{ steps.dl-cache-restore.outputs.cache-hit }}" "${{ steps.dl-cache-restore.outputs.cache-matched-key }}"
+            report_cache ccache "${{ steps.ccache-restore.outputs.cache-hit }}" "${{ steps.ccache-restore.outputs.cache-matched-key }}"
+            report_cache Feeds "${{ steps.feeds-cache-restore.outputs.cache-hit }}" "${{ steps.feeds-cache-restore.outputs.cache-matched-key }}"
+            report_cache Honk-Git "${{ steps.honk-git-cache.outputs.cache-hit }}" "${{ steps.honk-git-cache.outputs.cache-matched-key }}"
+            report_cache Rust "${{ steps.rustup-cache-restore.outputs.cache-hit }}" "${{ steps.rustup-cache-restore.outputs.cache-matched-key }}"
+            report_cache Cargo "${{ steps.honk-cargo-cache.outputs.cache-hit }}" "${{ steps.honk-cargo-cache.outputs.cache-matched-key }}"
+            report_cache bpf-linker "${{ steps.bpf-linker-cache.outputs.cache-hit }}" "${{ steps.bpf-linker-cache.outputs.cache-matched-key }}"
+            report_cache Staging "${{ steps.staging-cache.outputs.cache-hit }}" "${{ steps.staging-cache.outputs.cache-matched-key }}"
+            report_cache Host-tools "${{ steps.tools-cache.outputs.cache-hit }}" "${{ steps.tools-cache.outputs.cache-matched-key }}"
+            echo '## Cache footprints'
+            for path in /home/runner/.cache/apt-archives /home/runner/.cache/apt-lists /home/runner/.cache/git/openwrt-source.git /home/runner/.cache/git/honk.git /home/runner/.cache/ccache /home/runner/.cache/bpf-linker /home/runner/.cargo/registry /home/runner/.cargo/git /home/runner/.rustup/toolchains source/dl source/feeds source/staging_dir source/build_dir/host source/build_dir/toolchain-*; do
+              [[ -e "$path" ]] || continue
+              du -sh "$path" || true
+            done
+            echo
+            echo '## Feed revisions'
+            if [[ -f source/.cache-feed-revisions ]]; then cat source/.cache-feed-revisions; else echo 'Feed manifest unavailable'; fi
+            echo
+            echo '## ccache statistics'
+            if [[ -f source/ccache-stats.log ]]; then cat source/ccache-stats.log; else echo 'ccache statistics unavailable'; fi
+          } > artifacts/logs/build-summary.md
 
       - name: Verify and collect firmware artifacts
         if: always()
@@ -633,7 +862,7 @@ jobs:
           mkdir -p artifacts/logs
           cp source/config-build-final.config artifacts/ 2>/dev/null || true
           cp source/feeds-update.log source/feeds-install.log source/defconfig.log source/download.log artifacts/logs/ 2>/dev/null || true
-          cp source/build*.log source/ccache-stats.log source/resource-plan.log source/resource-monitor.log artifacts/logs/ 2>/dev/null || true
+          cp source/build*.log source/ccache-stats.log source/ccache-debug.log source/ccache-log-summary.log source/resource-plan.log source/resource-monitor.log artifacts/logs/ 2>/dev/null || true
           cp source/config-build-final.config artifacts/logs/ 2>/dev/null || true
           if [[ "${{ job.status }}" == "success" && -d source/bin/targets/mediatek/filogic ]]; then
             cp -a source/bin/targets/mediatek/filogic/. artifacts/

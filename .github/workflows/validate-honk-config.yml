@@ -14,6 +14,9 @@ on:
       - '.github/workflows/validate-honk-config.yml'
   workflow_dispatch:
 
+env:
+  HONK_COMMIT: e104a4930c5fc4f625f3355257626495685424f5
+
 permissions:
   contents: read
 
@@ -24,18 +27,23 @@ jobs:
       - name: Checkout configuration
         uses: actions/checkout@v4
 
-      - name: Clone pinned ImmortalWrt source
+      - name: Restore OpenWrt Git object cache
+        id: openwrt-git-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            git-openwrt-v1-${{ runner.os }}-
+
+      - name: Checkout pinned ImmortalWrt source
         shell: bash
         run: |
           set -euo pipefail
-          SOURCE=https://github.com/shiyu1314/openwrt-source
-          REF=v25.12.6
-          EXPECTED=dc327b29f23cbee6c4dc41fef63656db0f7dba38
-          git clone --filter=blob:none --no-checkout "$SOURCE" source
-          git -C source fetch --depth=1 origin "$REF"
-          git -C source checkout --detach FETCH_HEAD
-          test "$(git -C source rev-parse HEAD)" = "$EXPECTED"
-
+          bash scripts/checkout-pinned-source.sh \
+            https://github.com/shiyu1314/openwrt-source v25.12.6 \
+            dc327b29f23cbee6c4dc41fef63656db0f7dba38 \
+            /home/runner/.cache/git/openwrt-source.git source
       - name: Verify RAX3000M NAND source profile and DTS
         shell: bash
         run: |
@@ -54,20 +62,31 @@ jobs:
         run: |
           set -euo pipefail
           cp scripts/prepare-honk-build.sh source/scripts/
+          cp scripts/update-feeds-cache.sh source/scripts/
           cp config/kernel-bpf.fragment source/config/
           cp config/diffconfig source/config/
           chmod +x source/scripts/prepare-honk-build.sh
           cd source
           bash scripts/prepare-honk-build.sh
 
-      - name: Update and install all feeds (upstream reference order)
+      - name: Restore feeds repository cache
+        id: feeds-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: source/feeds
+          key: feeds-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            feeds-v3-${{ runner.os }}-
+            feeds-v2-${{ runner.os }}-
+            feeds-v1-${{ runner.os }}-
+
+      - name: Update changed feeds and install packages
+        id: feeds-update-install
         shell: bash
         run: |
           set -euo pipefail
           cd source
-          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
-          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
-
+          bash scripts/update-feeds-cache.sh
       - name: Run defconfig and validate target and Honk packages
         shell: bash
         run: |
@@ -139,6 +158,19 @@ jobs:
           fi
           echo 'PASS: exact NAND profile, Honk packages, BPF fragment and OpenWrt BTF Kconfig checks.'
           echo 'No firmware compilation or publishing is performed.'
+
+      - name: Save OpenWrt Git object cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/git/openwrt-source.git
+          key: git-openwrt-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save feeds repository cache
+        if: always() && steps.feeds-update-install.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: source/feeds
+          key: feeds-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload config and feed diagnostics
         if: always()
