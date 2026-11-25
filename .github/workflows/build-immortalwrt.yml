@@ -1,0 +1,342 @@
+name: Build RAX3000M NAND ImmortalWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_jobs:
+        description: "Parallel build jobs (4 is the safe default)"
+        required: false
+        default: "4"
+        type: choice
+        options: ["2", "4", "6"]
+      ssh_debug:
+        description: "Enable tmate debugging session"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-immortalwrt.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: immortalwrt-rax3000m-nand-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMMORTALWRT_REPO: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
+  IMMORTALWRT_REF: 458d2f7e9295ee3709dc4f0d5ca5fabbd4cc1863
+  CONFIG_REPO: https://github.com/shawnpxtl/Actions-CMCC-RAX3000M
+  CONFIG_REF: 29ae1213a8f51ed6c0d00c0f7b5533cea02420bc
+  HONK_FEED_REPO: https://github.com/daeuniverse/openwrt-packages
+  HONK_FEED_REF: e104a4930c5fc4f625f3355257626495685424f5
+  HONK_SOURCE_REPO: https://github.com/daeuniverse/honk
+  HONK_SOURCE_REF: 64848881b7304e250e7a25422f4f1d86a5975eca
+  CCACHE_DIR: /home/runner/.cache/ccache
+  CCACHE_MAXSIZE: 8G
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: Build ImmortalWrt 25.12 for RAX3000M NAND
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout firmware configuration repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint \
+            bison build-essential bzip2 ccache cmake cpio curl \
+            device-tree-compiler file flex gawk gettext git g++ \
+            gperf libelf-dev libncurses-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev libtool lsb-release \
+            libfuse-dev libclang-dev clang llvm dwarves zstd python3-dev \
+            libgmp-dev libmpc-dev libmpfr-dev python3 python3-setuptools rsync scons squashfs-tools subversion swig time unzip wget xsltproc zlib1g-dev
+          sudo timedatectl set-timezone "$TZ"
+          df -hT
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: immortalwrt-ccache-v1-${{ runner.os }}-${{ env.IMMORTALWRT_REF }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            immortalwrt-ccache-v1-${{ runner.os }}-${{ env.IMMORTALWRT_REF }}-
+            immortalwrt-ccache-v1-${{ runner.os }}-
+
+      - name: Checkout pinned ImmortalWrt MTK source
+        run: |
+          git clone --filter=blob:none "$IMMORTALWRT_REPO" immortalwrt
+          git -C immortalwrt checkout --detach "$IMMORTALWRT_REF"
+          echo "ImmortalWrt commit: $(git -C immortalwrt rev-parse HEAD)"
+          test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_REF"
+          IMAGE_MAKEFILE="immortalwrt/target/linux/mediatek/image/filogic.mk"
+          if ! grep -Eq '^define Device/cmcc_rax3000m$' "$IMAGE_MAKEFILE" ||
+             ! grep -Eq '^TARGET_DEVICES \+= cmcc_rax3000m$' "$IMAGE_MAKEFILE"; then
+            echo "::error::Pinned source is missing the exact cmcc_rax3000m image profile."
+            exit 1
+          fi
+          grep -A35 -E '^define Device/cmcc_rax3000m$' "$IMAGE_MAKEFILE"
+      - name: Checkout pinned RAX3000M build configuration
+        run: |
+          git clone --filter=blob:none "$CONFIG_REPO" build-config
+          git -C build-config checkout --detach "$CONFIG_REF"
+          test -s build-config/diy-part1.sh
+          test -s build-config/rax3000m/immortalwrt-chasey/rax3000m-imoutowrt.config
+          test -s build-config/rax3000m/immortalwrt-chasey/diy-part2-rax3000m.sh
+          echo "Build configuration commit: $(git -C build-config rev-parse HEAD)"
+          git clone --filter=blob:none "$HONK_FEED_REPO" honk-packages
+          git -C honk-packages checkout --detach "$HONK_FEED_REF"
+          test "$(git -C honk-packages rev-parse HEAD)" = "$HONK_FEED_REF"
+          echo "Honk feed commit: $(git -C honk-packages rev-parse HEAD)"
+
+      - name: Load feeds configuration
+        run: |
+          # Use the pinned Honk feed; install Honk only, not Nikki or the separate DAE proxy.
+          grep -v 'OpenWrt-nikki' build-config/diy-part1.sh > immortalwrt/diy-part1.sh
+          chmod +x immortalwrt/diy-part1.sh
+          cd immortalwrt
+          ./diy-part1.sh
+          echo "src-link honkfeed $GITHUB_WORKSPACE/honk-packages" >> feeds.conf.default
+          echo "Configured feeds:"
+          cat feeds.conf.default
+
+      - name: Update and install feeds
+        run: |
+          cd immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds install -p honkfeed honk luci-app-honk luci-lib-daeuniverse vmlinux-btf-builtin
+
+      - name: Verify USB modem utility package definitions
+        run: |
+          set -euo pipefail
+          cd immortalwrt
+          # usb-modeswitch is provided by the pinned ImmortalWrt source (package name differs from directory name).
+          test -s package/utils/usbmode/Makefile
+          grep -q '^define Package/usb-modeswitch$' package/utils/usbmode/Makefile
+          # usbutils is supplied by the packages feed and installed by scripts/feeds install -a.
+          test -s package/feeds/packages/usbutils/Makefile
+          grep -q '^define Package/usbutils$' package/feeds/packages/usbutils/Makefile
+          echo 'USB modem utility package definitions: PASS'
+
+
+      - name: Checkout pinned Honk source
+        run: |
+          test -f immortalwrt/feeds/honkfeed/honk/Makefile
+          mkdir -p immortalwrt/feeds/honkfeed/honk/src
+          git clone --filter=blob:none "$HONK_SOURCE_REPO" immortalwrt/feeds/honkfeed/honk/src
+          git -C immortalwrt/feeds/honkfeed/honk/src checkout --detach "$HONK_SOURCE_REF"
+          test "$(git -C immortalwrt/feeds/honkfeed/honk/src rev-parse HEAD)" = "$HONK_SOURCE_REF"
+          echo "Honk source commit: $(git -C immortalwrt/feeds/honkfeed/honk/src rev-parse HEAD)"
+
+      - name: Install pinned Honk Rust toolchains
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.99.1
+          target: aarch64-unknown-linux-musl
+
+      - name: Install pinned Honk eBPF Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: nightly-2026-10-20
+          components: rust-src, llvm-tools
+
+      - name: Install pinned bpf-linker
+        run: |
+          set -euo pipefail
+          BPF_LINKER_VERSION=0.11.0
+          BPF_LINKER_SHA256=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+          mkdir -p "$HOME/.cache/bpf-linker" "$HOME/.cargo/bin"
+          ARCHIVE="$HOME/.cache/bpf-linker/bpf-linker-${BPF_LINKER_VERSION}.tar.zst"
+          curl -fsSL --retry 3 --retry-all-errors -o "$ARCHIVE" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "$BPF_LINKER_SHA256  $ARCHIVE" | sha256sum -c -
+          zstd -dc "$ARCHIVE" | tar -xf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+          bpf-linker --version
+
+
+      - name: Apply RAX3000M configuration
+        run: |
+          cd immortalwrt
+          set -euo pipefail
+          # Start from the known-good Honk diffconfig, adapted to ImmortalWrt's RAX3000M profile.
+          cp "$GITHUB_WORKSPACE/config/diffconfig" .config
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y$' .config
+          sed -i 's/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y$/CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m=y/' .config
+
+          # Keep Honk Full, the MTK Wi-Fi driver, HNAT controls and Argon theme.
+          # USB 3.0 storage and common USB 5G modem transports (QMI/MBIM/NCM/ECM/RNDIS).
+          # IPv6 stack and LuCI protocol support; UPnP uses the nftables backend.
+          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim kmod-ipv6 odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
+            sed -i \
+              -e "/^CONFIG_PACKAGE_${pkg}=y$/d" \
+              -e "/^# CONFIG_PACKAGE_${pkg} is not set$/d" \
+              .config
+            echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+          done
+          sed -i '/^CONFIG_IPV6=/d' .config
+          echo 'CONFIG_IPV6=y' >> .config
+
+          for setting in CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7673=y \
+            CONFIG_MTK_MT_WIFI_MT7981_20260601=y; do
+            symbol="${setting%%=*}"
+            sed -i "/^${symbol}=/d" .config
+            echo "$setting" >> .config
+          done
+
+          # Honk requires full debug info, BTF and its TC/eBPF kernel options.
+          sed -i \
+            -e '/^CONFIG_KERNEL_DEBUG_INFO=/d' \
+            -e '/^# CONFIG_KERNEL_DEBUG_INFO is not set$/d' \
+            -e '/^CONFIG_KERNEL_DEBUG_INFO_BTF=/d' \
+            -e '/^# CONFIG_KERNEL_DEBUG_INFO_BTF is not set$/d' \
+            -e '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' \
+            -e '/^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$/d' \
+            .config
+          cat >> .config <<'EOF'
+          CONFIG_KERNEL_DEBUG_INFO=y
+          CONFIG_KERNEL_DEBUG_INFO_BTF=y
+          # CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+          EOF
+
+          KERNEL_CONFIG="target/linux/mediatek/filogic/config-6.12"
+          test -f "$KERNEL_CONFIG"
+          while IFS= read -r setting; do
+            if [[ -z "$setting" || "$setting" =~ ^# ]]; then
+              continue
+            fi
+            symbol="${setting%%=*}"
+            if grep -qE "^[[:space:]]*${symbol}=" "$KERNEL_CONFIG"; then
+              continue
+            fi
+            sed -i "/^[[:space:]]*# ${symbol} is not set$/d" "$KERNEL_CONFIG"
+            echo "$setting" >> "$KERNEL_CONFIG"
+          done < "$GITHUB_WORKSPACE/config/kernel-bpf.fragment"
+
+          make defconfig
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m=y$' .config
+          grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' .config
+          grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config
+          grep -q '^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$' .config
+          grep -q '^CONFIG_IPV6=y$' .config
+          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim kmod-ipv6 odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
+            grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config || {
+              echo "::error::Required package missing after defconfig: ${pkg}"
+              exit 1
+            }
+          done
+          if grep -Eq '^CONFIG_PACKAGE_(dae|luci-app-dae|nikki|mihomo-meta|luci-app-nikki|luci-app-openclash|luci-app-openvpn-server|openvpn-openssl|openvpn-easy-rsa)=y$' .config; then            echo "::error::An excluded proxy package remains enabled."
+            exit 1
+          fi
+          echo "--- Honk core and kernel datapath ---"
+          grep -E '^CONFIG_(KERNEL_DEBUG_INFO(_BTF|_REDUCED)?|PACKAGE_(honk|luci-app-honk|vmlinux-btf-builtin|kmod-sched-bpf|kmod-sched-core|kmod-veth|kmod-nft-core|kmod-nft-queue|kmod-nfnetlink-queue|kmod-nf-conntrack))=' .config
+          echo "--- Argon theme ---"
+          grep -E '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
+          echo "--- HNAT and MTK Wi-Fi ---"
+          grep -E '^CONFIG_(PACKAGE_(kmod-mediatek_hnat|luci-app-turboacc-mtk|kmod-mt_wifi)|MTK_MT_WIFI_DRIVER_VERSION_7673|MTK_MT_WIFI_MT7981_20260601)=' .config
+          echo "--- ccache ---"
+          grep -E '^CONFIG_CCACHE|^CONFIG_CCACHE_DIR' .config
+
+      - name: Optional SSH debugging
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh_debug }}
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Download sources
+        run: |
+          cd immortalwrt
+          export CCACHE_DIR="$CCACHE_DIR"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -z
+          make download -j8
+          find dl -size -1024c -print -delete
+
+      - name: Compile firmware with fallback
+        id: compile
+        env:
+          BUILD_JOBS: ${{ inputs.build_jobs || '4' }}
+        run: |
+          set -o pipefail
+          cd immortalwrt
+          export CCACHE_DIR="$CCACHE_DIR"
+          ccache -M "$CCACHE_MAXSIZE"
+          echo "Build jobs: $BUILD_JOBS"
+          if make -j"$BUILD_JOBS" 2>&1 | tee "$GITHUB_WORKSPACE/build-parallel.log"; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "Parallel build failed; retrying serially."
+            if make -j1 2>&1 | tee "$GITHUB_WORKSPACE/build-serial.log"; then
+              echo "result=success" >> "$GITHUB_OUTPUT"
+            else
+              echo "Serial build failed; collecting verbose diagnostics."
+              make -j1 V=s 2>&1 | tee "$GITHUB_WORKSPACE/build-verbose.log"
+              exit 1
+            fi
+          fi
+          ccache -s | tee "$GITHUB_WORKSPACE/ccache-stats.txt"
+
+      - name: Verify NAND firmware output
+        if: steps.compile.outputs.result == 'success'
+        run: |
+          set -euo pipefail
+          TARGET_DIR="immortalwrt/bin/targets/mediatek/filogic"
+          test -d "$TARGET_DIR"
+          echo "Generated files:"
+          find "$TARGET_DIR" -maxdepth 2 -type f -printf '%P (%s bytes)\n' | sort
+          mapfile -t sysupgrade_images < <(find "$TARGET_DIR" -maxdepth 1 -type f -iname '*cmcc_rax3000m*sysupgrade*' -print)
+          mapfile -t nand_artifacts < <(find "$TARGET_DIR" -maxdepth 1 -type f \( -iname '*cmcc_rax3000m*nand-preloader.bin' -o -iname '*cmcc_rax3000m*nand-bl31-uboot.fip' \) -print)
+          if [ "${#sysupgrade_images[@]}" -eq 0 ]; then
+            echo "::error::No cmcc_rax3000m sysupgrade image found."
+            exit 1
+          fi
+          if [ "${#nand_artifacts[@]}" -lt 2 ]; then
+            echo "::error::Missing RAX3000M NAND preloader/FIP artifacts; refusing to publish."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/firmware"
+          find "$TARGET_DIR" -maxdepth 1 -type f -iname '*cmcc_rax3000m*' -exec cp -t "$GITHUB_WORKSPACE/firmware/" {} +
+          find "$GITHUB_WORKSPACE/firmware" -maxdepth 1 -type f ! -name 'SHA256SUMS' -print0 | sort -z | xargs -0 -r sha256sum > "$GITHUB_WORKSPACE/firmware/SHA256SUMS.tmp"
+          mv "$GITHUB_WORKSPACE/firmware/SHA256SUMS.tmp" "$GITHUB_WORKSPACE/firmware/SHA256SUMS"
+
+          echo "Verified RAX3000M sysupgrade images:"
+          printf '%s\n' "${sysupgrade_images[@]}"
+          echo "Verified RAX3000M NAND boot artifacts:"
+          printf '%s\n' "${nand_artifacts[@]}"
+      - name: Ensure ccache directory exists
+        if: always()
+        run: mkdir -p "$CCACHE_DIR"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: immortalwrt-ccache-v1-${{ runner.os }}-${{ env.IMMORTALWRT_REF }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload firmware and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-rax3000m-nand-${{ github.run_number }}
+          path: |
+            firmware/
+            build-parallel.log
+            build-serial.log
+            build-verbose.log
+            ccache-stats.txt
+          if-no-files-found: warn
+          retention-days: 14
