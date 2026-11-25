@@ -596,12 +596,13 @@ jobs:
                 exit 1
               fi
             else
-              echo "Non-OOM compile failure; collecting focused Honk package diagnostics"
-              /usr/bin/time -v make -j1 package/feeds/daeuniverse/honk/compile V=s 2>&1 | tee build-honk-verbose.log || true
+              echo "Non-OOM compile failure; collecting focused MTK Wi-Fi driver diagnostics"
+              /usr/bin/time -v make -j1 package/mtk/drivers/mt_wifi/compile V=s 2>&1 | tee build-mt-wifi-verbose.log || true
+              echo "--- MTK Wi-Fi compiler diagnostics ---"
+              grep -n -E -C 3 'error:|fatal error:|undefined reference|Error [0-9]|No rule to make target|not declared|compilation terminated|failed to build' build-mt-wifi-verbose.log | tail -160 || true
               echo "BUILD_RESULT=failure-parallel" >> "$GITHUB_ENV"
               exit 1
-            fi
-          fi
+            fi          fi
           echo "Compile elapsed: $((SECONDS-START)) seconds" | tee -a resource-plan.log
           kill "$MONITOR_PID" 2>/dev/null || true
           wait "$MONITOR_PID" 2>/dev/null || true
