@@ -193,12 +193,12 @@ jobs:
           echo 'CONFIG_IPV6=y' >> .config
 
           for setting in CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7673=y \
-            CONFIG_MTK_MT_WIFI_MT7981_20260601=y; do
+            CONFIG_MTK_MT_WIFI_MT7981_20260601=y \
+            CONFIG_MTK_WPA3_SUPPORT=y; do
             symbol="${setting%%=*}"
             sed -i "/^${symbol}=/d" .config
             echo "$setting" >> .config
           done
-
           # Honk requires full debug info, BTF and its TC/eBPF kernel options.
           sed -i \
             -e '/^CONFIG_KERNEL_DEBUG_INFO=/d' \
@@ -255,6 +255,11 @@ jobs:
             exit 1
           }
           echo "MTK 802.11k RRM support: enabled"
+          grep -q '^CONFIG_MTK_WPA3_SUPPORT=y$' .config || {
+            echo "::error::MTK WPA3/SAE support must be enabled; mt_wifi 7.6.7.3 references SAE state unconditionally."
+            exit 1
+          }
+          echo "MTK WPA3/SAE support: enabled"
           echo "--- ccache ---"
           grep -E '^CONFIG_CCACHE|^CONFIG_CCACHE_DIR' .config
 
