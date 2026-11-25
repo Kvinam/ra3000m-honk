@@ -182,7 +182,7 @@ jobs:
           # Keep Honk Full, the MTK Wi-Fi driver, HNAT controls and Argon theme.
           # USB 3.0 storage and common USB 5G modem transports (QMI/MBIM/NCM/ECM/RNDIS).
           # IPv6 stack and LuCI protocol support; UPnP uses the nftables backend.
-          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim kmod-ipv6 odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
+          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
             sed -i \
               -e "/^CONFIG_PACKAGE_${pkg}=y$/d" \
               -e "/^# CONFIG_PACKAGE_${pkg} is not set$/d" \
@@ -234,13 +234,14 @@ jobs:
           grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config
           grep -q '^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$' .config
           grep -q '^CONFIG_IPV6=y$' .config
-          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim kmod-ipv6 odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
+          for pkg in honk luci-app-honk vmlinux-btf-builtin kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack ca-bundle v2ray-geoip v2ray-geosite luci-lib-daeuniverse kmod-mt_wifi kmod-mediatek_hnat luci-app-turboacc-mtk luci-theme-argon kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-net kmod-usb-wdm kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-net-rndis kmod-usb-net-huawei-cdc-ncm kmod-usb-serial kmod-usb-serial-option kmod-usb-serial-wwan kmod-usb-acm usb-modeswitch usbutils wwan uqmi umbim luci-proto-qmi luci-proto-mbim odhcp6c odhcpd-ipv6only luci-proto-ipv6 luci-app-upnp miniupnpd-nftables luci-i18n-upnp-zh-cn; do
             grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config || {
               echo "::error::Required package missing after defconfig: ${pkg}"
               exit 1
             }
           done
-          if grep -Eq '^CONFIG_PACKAGE_(dae|luci-app-dae|nikki|mihomo-meta|luci-app-nikki|luci-app-openclash|luci-app-openvpn-server|openvpn-openssl|openvpn-easy-rsa)=y$' .config; then            echo "::error::An excluded proxy package remains enabled."
+          if grep -Eq '^CONFIG_PACKAGE_(dae|luci-app-dae|nikki|mihomo-meta|luci-app-nikki|luci-app-openclash|luci-app-openvpn-server|openvpn-openssl|openvpn-easy-rsa)=y$' .config; then
+            echo "::error::An excluded proxy package remains enabled."
             exit 1
           fi
           echo "--- Honk core and kernel datapath ---"
