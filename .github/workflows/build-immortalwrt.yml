@@ -250,6 +250,11 @@ jobs:
           grep -E '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
           echo "--- HNAT and MTK Wi-Fi ---"
           grep -E '^CONFIG_(PACKAGE_(kmod-mediatek_hnat|luci-app-turboacc-mtk|kmod-mt_wifi)|MTK_MT_WIFI_DRIVER_VERSION_7673|MTK_MT_WIFI_MT7981_20260601)=' .config
+          grep -q '^CONFIG_MTK_DOT11K_RRM_SUPPORT=y$' .config || {
+            echo "::error::MTK 802.11k RRM support must be enabled for the pinned mt_wifi 7.6.7.3 driver."
+            exit 1
+          }
+          echo "MTK 802.11k RRM support: enabled"
           echo "--- ccache ---"
           grep -E '^CONFIG_CCACHE|^CONFIG_CCACHE_DIR' .config
 
